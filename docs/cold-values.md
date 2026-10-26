@@ -78,6 +78,9 @@ FLR+链回 bootmgfw 正常。
 | SEC2_CPUCTL 0x840100 | 0xbadf5620 | 与 28e0 相同的冷态域门控（复位后可读，scrubber 通过） |
 | GOP 句柄数 | **2** | iGPU 也在 console 里 |
 
+**结论（2026-10-26，v0.1.3）**：该卡全链验证通过（WPR2→booter→四写→选择器→FLR 存活），
+FP16 tensor 22 → 38~42 TFLOPS（1.7~1.9×）。门控寄存器经回退未造成任何后续影响。
+
 **同机同模式的对照**（2026-10-26，28e0 混合关机、只有 dGPU 的 1 个 GOP、全程跑完：
 VGA 读回正常 → layout 走 bit3=0 → vga=FB 顶；FWSEC WPR2 验证、booter 点火、四写、
 选择器穿 FLR）。因此 0xbadf1301 的关联量是"**dGPU 是否是 console owner**"而不是"混合模式"：

@@ -192,7 +192,7 @@ the kmod, our EFI path is structurally identical — expected compatible);
 | --- | --- | --- |
 | AD107 | 4060 Laptop **28e0** | ✅ verified (this repo) |
 | AD107 | 4060 2882 / 4060 Laptop 28a0 / 4050M 28e1 | 🟢 upstream-verified |
-| AD107 | 4050 Laptop **28a1** | 🟡 two silicon runs 2026-10-26: the gated VGA value `0xbadf1301` is tolerated (fallback equals the healthy-card value), the second run **completed FWSEC on the GSP with WPR2 verified** (a first for this ID) and was then stopped by a second strict read for the WprMeta — 0.1.3 takes the values from the layout instead; nothing past the booter is proven on this ID |
+| AD107 | 4050 Laptop **28a1** | ✅ verified (2026-10-26, v0.1.3): full chain on silicon (WPR2 verified → booter marker → four writes → selectors → signature restore → AON survival after FLR); FP16 tensor **22 → 38-42 TFLOPS (1.7-1.9x)**, integrity self-tests green; the gated `0xbadf1301` goes through the fallback |
 | AD106 | 4060Ti 2803 / 4060Ti 16G 2805 | 🟢 |
 | AD104 | 4070Ti 2782 / 4070S 2783 / 4070 2786 | 🟢 |
 | AD103 | 4080S 2702 / 4080 2704 / 4070TiS 2705 / 4070 2709 / 4090M 2757 | 🟢 |

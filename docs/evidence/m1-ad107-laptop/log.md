@@ -475,3 +475,24 @@ re-initialise it; hybrid makes it best-effort, so the iGPU-only path cuts
 power before POST and the sleep path resumes without devinit. The tool has
 no ACPI interpreter to run _PS0/PR3 itself. Documented in both READMEs;
 operation rule = Restart from Windows, never sleep/wake into the stick.
+
+## 28a1 VERIFIED END TO END (v0.1.3, 2026-10-26) — unlock holds, 1.7-1.9x
+
+Third 28a1 run, on the build that stops re-reading the gated register.
+Full chain: WPR2 verified -> booter marker -> four PLM writes -> selector
+writes -> stock signature restored -> FLR -> selectors survive (AON) ->
+chain to Windows.
+
+Windows-side acceptance (user-run, same harness family as the 28e0
+figures, FP16 tensor):
+  stock    : 22 TFLOPS
+  unlocked : 38-42 TFLOPS  = 1.7-1.9x
+Integrity self-tests green. The ratio is higher than the 28e0 report's
+1.65x because the 4050's smaller budget leaves the released tensor slots
+a bigger share of a real GEMM; absolute values are not comparable across
+the two IDs, only the before/after pairs are.
+
+28a1 is now the second silicon-verified ID after 28e0 and the first card
+the community had no report for at all. The whole 28a1 story is one
+gated register (VGA_WORKSPACE) plus the two places we re-read it - no
+chip-specific geometry, no asset change.
