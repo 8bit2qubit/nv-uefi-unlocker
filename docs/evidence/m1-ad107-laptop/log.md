@@ -394,14 +394,44 @@ itself died in layout with EIO, NOT a poison that poisons the whole card:
 ROOT CAUSE: layout_from_registers used strict read32(), which turns ANY
 0xbadf_xxxx into EIO. VGA_WORKSPACE is the one layout input where poison
 is tolerable - only bit3 feeds the decision and bit3=0 routes to the same
-"reserve FB top 1 MiB" path the healthy 28e0 took (there the register
-reads 0x1). A gated VGA workspace is the expected state when the dGPU is
-not the primary display device: its devinit never wrote the pointer.
+"reserve FB top 1 MiB" path the healthy 28e0 took.
+
+STATE CORRELATION (supersedes the first "hybrid mode" reading): the SAME
+machine in the SAME hybrid mode, when the dGPU owns the console (the
+"hybrid shutdown" log below, 1 GOP handle), reads 0x625f04 normally,
+reaches the bit3=0 path (vga = FB top 0x1ffb00000) and completes the
+whole chain to selector read-back. The 4050 run had 2 GOP handles, i.e.
+the iGPU was in the console. So the gate tracks "dGPU is not the display
+owner", not hybrid power state. iGPU-only shutdown is the third state:
+dGPU cold, no GOP at all, BAR0 all-ones.
 
 FIX (next build): five raw reads with the raw values logged, poison
-rejected strictly for FB/MMU PLM/lock, tolerated (with fallback + MUX
-hint) only for VGA. 0xbadf1301 recorded as a new 0x13xx bucket.
+rejected strictly for FB/MMU PLM/lock, tolerated (fallback) only for
+VGA; 0xbadf1301 recorded as a new 0x13xx bucket; claim preflight that
+names D3cold when BAR0 stays all-ones after the MEM enable; sampler gets
+a NO_DECODE bucket (0xffffffff used to be printed as "[ok]").
 
 Expectation for the next run: layout passes; open risk is the GSP domain
-(CPUCTL/HWCFG2/FBIF read-backs) and whether FWSEC ignition survives
-without the dGPU ever being display owner.
+(CPUCTL/HWCFG2/FBIF read-backs) - note that the successful 28e0 log above
+shows those GSP regs equally gated (badf5620) BEFORE the engine reset and
+clean after it, so gating per se is not the blocker.
+
+## Control: 28e0 hybrid shutdown, dGPU as console (EFI v0.1.1, same machine)
+
+User-supplied log, full success in hybrid mode. Distinctive state, in
+order of appearance:
+
+  GOP-PROBE: 1 GOP handle (the dGPU's)
+  every SAMPLE read = 0xffffffff [ok]   <- BAR0 not decoding at handoff;
+                                           the claim's MEM enable fixes it
+  claim: raw COMMAND write cmd=0x0007 (MEM+BME+IO on)
+  AUTH-SCAN: GSP CPUCTL=0x10 ok, but BOOTVEC/DMACTL/IMEM/DMEM = badf5620
+  layout: fb=0x1ffc00000 vga=0x1ffb00000   <- VGA read FINE, bit3=0
+  scrubber asset absent -> proceeded without
+  FWSEC -> WPR2 verified; falcon reset ungated every badf5620 GSP reg
+  booter -> MAILBOX0=0x67b00001; four writes -> selectors survive FLR
+
+Two takeaways: (a) 0xffffffff at sample time is a decoder-off window,
+not a card identity, and must not be printed as "ok"; (b) pre-reset
+badf5620 on the GSP is the normal gated state and is reset away - the
+open risk for the 4050 is not that gating exists.

@@ -68,15 +68,21 @@ FEAT 簇 13/13 可读（存在性=是，PL0 可读）✓。
 
 ## AD107M 第二张卡（RTX 4050 Laptop，10de:28a1）——首次实机（2026-10-26，混合输出模式）
 
-同一 G614JV，卡换成 4050；整机处于 **iGPU 主显（Optimus，2 个 GOP 句柄）**状态。事务在
-layout 读数处失败（VGA 毒值把整条 layout 拒掉），FLR+链回 bootmgfw 正常。
+同一 G614JV，卡换成 4050。事务在 layout 读数处失败（VGA 毒值把整条 layout 拒掉），
+FLR+链回 bootmgfw 正常。
 
 | 寄存器 | 值 | 解读 |
 |---|---|---|
 | FB_SIZE_MIB | 可读（6GB 量级） | 显存已训练，不是 D3cold |
-| **VGA_WORKSPACE 0x625f04** | **0xbadf1301** | **新毒值（0x13xx 桶）**——dGPU 非主显，devinit 没给它写 workspace 指针。只有 bit3 参与布局判决，bit3=0 → 与健康卡（该寄存器 0x1）走同一条"FB 顶 1MiB 保留"路径 |
+| **VGA_WORKSPACE 0x625f04** | **0xbadf1301** | **新毒值（0x13xx 桶）**——该寄存器门控。只有 bit3 参与布局判决，bit3=0 → 与健康卡走同一条"FB 顶 1MiB 保留"路径 |
 | SEC2_CPUCTL 0x840100 | 0xbadf5620 | 与 28e0 相同的冷态域门控（复位后可读，scrubber 通过） |
-| GOP 句柄数 | **2** | 混合输出判据；健康 28e0 实测为 1 |
+| GOP 句柄数 | **2** | iGPU 也在 console 里 |
+
+**同机同模式的对照**（2026-10-26，28e0 混合关机、只有 dGPU 的 1 个 GOP、全程跑完：
+VGA 读回正常 → layout 走 bit3=0 → vga=FB 顶；FWSEC WPR2 验证、booter 点火、四写、
+选择器穿 FLR）。因此 0xbadf1301 的关联量是"**dGPU 是否是 console owner**"而不是"混合模式"：
+dGPU 主显时该寄存器正常，iGPU 占 console 时被门控。第三种状态是 iGPU-only 关机——
+dGPU 冷、无 GOP、BAR0 全 0xffffffff（claim 前采样即此现象，claim 后仍全 1 即 D3cold）。
 
 **修复**：`layout_from_registers` 的五个输入改 raw 读，FB/MMU 锁仍严格拒毒，
 仅 VGA workspace 容毒并回退（log 打出原值与 MUX 提示）。教训沿用 §3.3：毒值先分桶再

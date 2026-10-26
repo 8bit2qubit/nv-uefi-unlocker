@@ -314,11 +314,13 @@ pub fn layout_from_registers(
     // The VGA workspace pointer is the one layout input a poison value is
     // tolerable for: only bit3 decides, and bit3=0 (also the value on a
     // healthy card) means "no workspace pointer, reserve the FB top 1 MiB".
-    // A BADF here is the hybrid/Optimus signature - the dGPU is not the
-    // primary display device, whose devinit would have written it.
+    // Measured 2026-10-26: a hybrid-shutdown boot with the dGPU as console
+    // reads this register fine and takes the bit3=0 path (vga = FB top); a
+    // boot where the iGPU owned the console left it gated (0xbadf1301) on the
+    // same machine. Both land on the same fallback value.
     let vga = if inaccessible(vga_raw) {
         info!(
-            "layout: VGA workspace poison ({vga_raw:#010x}) - using PRAMIN-top fallback; on a laptop switch the MUX to dGPU-only and re-run"
+            "layout: VGA workspace gated ({vga_raw:#010x}) - dGPU was not the console owner; using the FB-top fallback (bit3=0 path, same value as a healthy card)"
         );
         0
     } else {

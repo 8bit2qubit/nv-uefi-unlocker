@@ -455,6 +455,15 @@ pub fn hs_prevalidate(
 /// re-provisions WPR2 (measured 0xe00), which is NOT the "already used"
 /// dirty state the guard exists to catch. PLM check stays.
 pub fn claim_guards(gpu: &TxGpu, post_flr: bool) -> Result<(), TxError> {
+    // Preflight: is BAR0 decoding at all? Right after the MEM enable a powered
+    // dGPU answers; one parked by the EC in D3cold (iGPU-only boot: no GOP on
+    // the dGPU) returns all-ones forever. Without this check the failure would
+    // surface later as a confusing Turing-PLM "unreadable".
+    let chip = gpu.read32_raw(0x0000_0000);
+    if chip == !0u32 {
+        info!("claim: BAR0 all-ones after MEM enable - the dGPU is powered off (D3cold); boot with the dGPU as console (hybrid shutdown with both GPUs awake, or MUX in dGPU-only) and re-run");
+        return Err(TxError::ENodev);
+    }
     // FEAT_PLM is PL0-LOCKED on Turing (measured: badf5040) - the EALREADY
     // check is only possible where the register reads. An inaccessible read
     // (EIO) is treated as "cannot evaluate", not as a failure.

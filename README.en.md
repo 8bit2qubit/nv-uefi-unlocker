@@ -156,7 +156,7 @@ the kmod, our EFI path is structurally identical — expected compatible);
 | --- | --- | --- |
 | AD107 | 4060 Laptop **28e0** | ✅ verified (this repo) |
 | AD107 | 4060 2882 / 4060 Laptop 28a0 / 4050M 28e1 | 🟢 upstream-verified |
-| AD107 | 4050 Laptop **28a1** | 🟡 first silicon 2026-10-26: in hybrid mode VGA workspace reads 0xbadf1301 and the layout used to reject it — now tolerated with a fallback; **switch the MUX to dGPU-only** and re-run, second half of the transaction still unproven on this ID |
+| AD107 | 4050 Laptop **28a1** | 🟡 first silicon 2026-10-26: with the iGPU as console owner VGA workspace reads 0xbadf1301 and the layout used to reject it — now tolerated (fallback equals the healthy-card value); **make the dGPU the console (MUX to discrete)** and re-run, second half of the transaction still unproven on this ID |
 | AD106 | 4060Ti 2803 / 4060Ti 16G 2805 | 🟢 |
 | AD104 | 4070Ti 2782 / 4070S 2783 / 4070 2786 | 🟢 |
 | AD103 | 4080S 2702 / 4080 2704 / 4070TiS 2705 / 4070 2709 / 4090M 2757 | 🟢 |

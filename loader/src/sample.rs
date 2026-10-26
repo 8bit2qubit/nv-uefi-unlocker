@@ -59,7 +59,9 @@ const PROM_CRC_DWORDS: usize = 0x4000; // 64 KiB identity pass
 /// Unknown high-half badf codes (e.g. the 0xbadf5620 first measured on
 /// AD107 SEC2_CPUCTL) fall into BADF_VARIANT instead of masquerading as ok.
 fn classify(v: u32) -> &'static str {
-    if v == 0xBADF_5040 {
+    if v == !0u32 {
+        "NO_DECODE"
+    } else if v == 0xBADF_5040 {
         "PRIV_VIOLATION"
     } else if v == 0xBADF_1100 {
         "UNDECODED"
@@ -106,6 +108,7 @@ pub fn run(gpu: &FoundGpu) {
     // the device (first measured on AD107: 36 misaligned reads -> UNSUPPORTED).
     let mut ok = 0usize;
     let mut badf = 0usize;
+    let mut no_decode = 0usize;
     let mut errors = 0usize;
     let mut non_badf_values: alloc::vec::Vec<(u32, u32)> = alloc::vec::Vec::new();
     let mut sweep_offsets: alloc::vec::Vec<u32> =
@@ -113,33 +116,38 @@ pub fn run(gpu: &FoundGpu) {
     sweep_offsets.push(FEAT_ROW_REMAPPER_PLM);
     for off in sweep_offsets {
         match pci.bar_try_read_u32(BAR0, off as u64) {
-            Some(v) => {
-                let c = classify(v);
-                if c == "ok" {
+            Some(v) => match classify(v) {
+                "ok" => {
                     ok += 1;
                     non_badf_values.push((off, v));
-                } else {
-                    badf += 1;
                 }
-            }
+                "NO_DECODE" => no_decode += 1,
+                _ => badf += 1,
+            },
             None => errors += 1,
         }
     }
     let v = pci.bar_read_u32(BAR0, FEAT_ROW_REMAPPER_PLM as u64);
     let _ = v; // 0x823b00 already swept above; headline read kept for the log line below
     info!(
-        "SAMPLE FEAT sweep 0x{:06x}-0x{:06x}+0x{:06x} (dword stride): {} ok / {} badf / {} read-errors",
+        "SAMPLE FEAT sweep 0x{:06x}-0x{:06x}+0x{:06x} (dword stride): {} ok / {} badf / {} all-ones / {} read-errors",
         FEAT_CLUSTER.start,
         FEAT_CLUSTER.end - 1,
         FEAT_ROW_REMAPPER_PLM,
         ok,
         badf,
+        no_decode,
         errors
     );
     for (off, v) in non_badf_values {
         info!("SAMPLE FEAT 0x{off:06x} = {v:#010x} [ok]");
     }
-    if ok == 0 {
+    if ok == 0 && no_decode > 0 {
+        // 0xffffffff means the BAR0 window is not decoding at all (MEM off at
+        // handoff, or the dGPU is powered off). The claim enables MEM later;
+        // an all-ones card that never changes is D3cold (iGPU-only boot).
+        info!("SAMPLE: BAR0 not decoding at sample time (all-ones) - MEM enable happens in the claim; a card that stays all-ones after it is powered off (D3cold)");
+    } else if ok == 0 {
         info!("SAMPLE FEAT cluster: NOT readable at PL0 on this chip (all badf) - recorded as the answer");
     }
     // FEAT_READOUT_1 headline: 0x00000000 = full speed, non-zero = throttled.
@@ -155,9 +163,10 @@ pub fn run(gpu: &FoundGpu) {
             };
             match boot::calculate_crc32(bytes) {
                 Ok(crc) => info!(
-                    "SAMPLE NV_PROM first {:#x} bytes: crc32 {crc:#010x}, magic {:#010x}",
+                    "SAMPLE NV_PROM first {:#x} bytes: crc32 {crc:#010x}, magic {:#010x}{}",
                     buf.len() * 4,
-                    buf[0]
+                    buf[0],
+                    if buf[0] == !0u32 { " (window all-ones - CRC not an identity)" } else { "" }
                 ),
                 Err(e) => info!("SAMPLE NV_PROM crc failed: {:?}", e.status()),
             }
