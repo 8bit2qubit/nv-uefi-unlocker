@@ -82,7 +82,7 @@ V67 payload 与全部资产再生成：`cargo run -p assets -- generate-ad102` /
 
 ## 与 nvoc kmd 功耗墙解锁配合使用
 
-本工具与本人主导开发的 **[Skyworks-Neo/nvoc](https://github.com/Skyworks-Neo/nvoc)** 的 kmd
+本工具与[本人](https://github.com/physicsdolphin)主导开发的 **[Skyworks-Neo/nvoc](https://github.com/Skyworks-Neo/nvoc)** 的 kmd
 功耗墙解锁**兼容且正交**：本工具在 UEFI 预驱动窗口解除 tensor 发射速率钳制
 （FEAT/WPR/WPRCFG PLM），nvoc kmd 在操作系统内解除功耗墙，nvoc set-volt-rail-limit 解除 slot 0,1,2 的Target Wall，Vbios Wall，VRM Max Wall(Vop) ——两者作用于
 不同层级（驱动“下面”+驱动“上面”），可叠加，推荐配合使用以获得极限性能。
