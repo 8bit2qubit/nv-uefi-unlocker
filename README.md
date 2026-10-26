@@ -15,34 +15,90 @@ FP16 GEMM 29.89 → 49.33 TFLOPS（1.65×）。完整报告见
 
 ## 使用（RTX 40 系笔记本/台式，AD10x 家族）
 
-1. 构建：`cargo efi-tx`（gated 事务构建；见下方构建节）。
-2. U 盘 FAT32 放入：`loader.efi` 改名 `BOOTX64.EFI`（先备份 U 盘原有文件），
-   以及 `assets/out/` 的 `booter_load_ad102.bin`、`gsp_boot_desc_ad102.bin`、
-   `gsp_boot_ad102.bin`、`fwimage_ad102.bin`、`fwsignature_ad102.bin`、
-   `scrubber_ad10x.bin`；**解锁模式再加** `v67-ad102-four-plm.bin`（不放即为
-   纯回放/诊断模式）。
-3. BIOS 关 Secure Boot、独显直连（dGPU only）模式；从 U 盘启动。
-4. 空格确认 → 全自动 → 日志落 `\loader.log` → 30 秒无操作自动回 Windows。
+### U 盘根布局（FAT32；`make-usbroot.ps1` 自动产出，手摆按下表）
 
-解锁为**易失**性质：每次冷启动重放一次，无持久化、无刷写、断电即清。
-V67 payload 生成：`cargo run -p assets -- generate-ad102`（从钉 SHA-256 的
-610.43.03 公开输入本地再生，产物 hash 硬校验）。
+| 文件 | 作用 | 必需 |
+| --- | --- | --- |
+| `BOOTX64.EFI` | 本工具（先备份 U 盘原有同名文件） | ✅ |
+| `booter_load_ad102.bin` | AD102-family Booter bundle（BTL1） | ✅ |
+| `gsp_boot_ad102.bin` + `gsp_boot_desc_ad102.bin` | GSP-RM boot 段 + v5 描述符 | ✅ |
+| `fwimage_ad102.bin` | GSP-RM 固件镜像（~80 MiB，radix3 装载） | ✅ |
+| `fwsignature_ad102.bin` | GSP-RM stock 签名（WprMeta 引用） | ✅ |
+| `scrubber_ad10x.bin` | 内核同款 SEC2 scrubber（BSI handoff 1→3） | ✅ |
+| `v67-ad102-four-plm.bin` | **V67 四写 payload——放上即解锁模式** | 可选 |
+| `\loader.log` | （运行产物）全部阶段日志，evidence record | 输出 |
+
+不放 `v67-*.bin` 即为**回放/诊断模式**：走完全链但零解锁写入（刷存在感
+的安全/取证模式）。日志中 `family 'xxx' transaction track not enabled`
+表示该芯片族尚未开放事务（当前仅 ad102 系启用）。
+
+### 操作流程
+
+1. BIOS：关 Secure Boot、显示模式切独显直连（dGPU only/Ultimate）——
+   混合模式下 EC 会在早期把 dGPU 置于 D3cold，BAR0 VBIOS aperture 不可见。
+2. U 盘启动 → 版本屏 → **空格确认**（30 秒无操作自动回 Windows）。
+3. 之后全自动：事务完成或失败都会自动链回 bootmgfw 进 Windows，全程日志
+   落 U 盘 `\loader.log`。
+4. 每次冷启动重放一次（解锁易失，无持久化、无刷写、断电即清）。
+
+V67 payload 与全部资产再生成：`cargo run -p assets -- generate-ad102` /
+`release/make-usbroot.ps1`（从钉 SHA-256 的 610.43.03 公开输入本地再生，
+产物 hash 硬校验；期望值见报告哈希表）。
 
 ## 与 nvoc kmd 功耗墙解锁配合使用
 
 本工具与 **[Skyworks-Neo/nvoc](https://github.com/Skyworks-Neo/nvoc)** 的 kmd
 功耗墙解锁**兼容且正交**：本工具在 UEFI 预驱动窗口解除 tensor 发射速率钳制
 （FEAT/WPR/WPRCFG PLM），nvoc kmd 在操作系统内解除功耗/电压墙——两者作用于
-不同层级，可叠加，推荐配合使用以获得极限性能（实测组合：4060 Laptop 上
-FP16 GEMM 8192 达 60–63 TFLOPS，芯片功耗 ~164 W，远超原厂 TGP）。
+不同层级，可叠加，推荐配合使用以获得极限性能。
+
+### 组合实测极限（RTX 4060 Laptop 28e0，cli-stressor-rs FP16 GEMM + nvoc）
+
+| 工况 | 数值 |
+| --- | --- |
+| FP16 GEMM 4096（仅本工具解锁） | 49.0–49.3 TFLOPS（stock 29.89，1.65×） |
+| FP16 GEMM 8192（+nvoc 功耗墙） | **60.8–63.1 TFLOPS**（相对 stock ≈ **2.1×**） |
+| GPU 核心时钟峰值 | **3045 MHz** @ 1.000 V |
+| 板级功耗峰值 | **206.8 W**（芯片 ~163.7 W + 显存 21.8 W + PWR_SRC 24.8 W；16-pin 164.4 W @ 19.8 V） |
+| 温度 | Hot Spot 峰值 **101.8–104.4 °C**，核心 79–81 °C，显存 58–66 °C |
+| 限流原因 | PerCap Reason 在 **Pwr**（功耗墙）与 **Thrm**（热墙）间切换 |
+
+判读：解锁后卡在满载时先顶功耗墙（Pwr），nvoc 放开功耗墙后转为顶热墙
+（Thrm）——**3045 MHz / 206.8 W / 104 °C Hot Spot 就是这块 8 GB 4060
+Laptop 的物理极限区间**，再往上任何优化都只能来自降温。
 
 > **⚠️ 硬件风险警告**
-> 两项解锁叠加后芯片功耗与热密度会大幅超出原厂设计包络（实测 Hot Spot
-> 可达 104 °C、PerCap Reason=Pwr 持续）。使用前必须自行确认并承担：
-> **散热系统足以应对**（液金/硅脂状态、风扇策略、均热板与热管规格），
-> **供电链路足以承载**（适配器功率、VRM 余量、电池策略），并保持监控
-> （温度/功耗/PerCap Reason）。**因超频超压超温导致的芯片、供电或整机
-> 物理损坏，本项目概不负责**——解锁是易失的，但烧坏的硅片不会恢复。
+> 两项解锁叠加后芯片功耗与热密度会**大幅超出原厂设计包络**（上表为实测
+> 极限：板级 200+ W、Hot Spot 105 °C 附近持续）。使用前必须自行确认并
+> 持续监控：
+> - **散热**：液金/硅脂状态、风扇策略、均热板与热管规格——Hot Spot 与核心
+>   温差 >20 °C 时意味着界面材料已接近极限；
+> - **供电**：适配器功率、VRM 余量、16-pin/电源链路温升（实测 16-pin
+>   164 W @ 19.8 V）；
+> - **监控**：GPU-Z/HWiNFO 的 Board Power、Hot Spot、PerCap Reason 三项
+>   常驻；Hot Spot 持续 >100 °C 属于裸奔区。
+>
+> **因超功耗、超压、超温导致的芯片、供电或整机物理损坏，本项目概不负责**
+> ——解锁是易失的，但烧坏的硅片不会恢复。
+
+## 工作原理速览
+
+NVIDIA 的算力钳制是 PRI 总线上的硬件门（PLM，默认 `0xffffff8f` = 仅
+heavy-secure 固件可写），主机/驱动写受保护寄存器被静默丢弃。唯一解锁路径是
+让**已签名的固件自己**在特权态写——本工具在 UEFI DXE 窗口（驱动加载前的唯一
+等价时窗）复刻内核驱动的完整引导链，并在"送 Booter"一步注入社区逆向出的
+V67 载荷：
+
+```
+claim(断 GOP/驱动+独占) → scrubber(BSI handoff 1→3) → FWSEC-FRTS(WPR2)
+→ booter(正确签名+BROM 验签, 邮箱=WprMeta) → [V67: 签名 DMA 无界拷贝
+溢出 DMEM 栈 → ROP → FEAT/WPR/WPRCFG/FBPA 四写 + marker 0x67b00001]
+→ selector 写入(PLM 开后主机写生效) → 签名还原 → FLR(冷卡交还) → bootmgfw
+```
+
+全程只读回验证（marker + HALT + PLM 逐项读回 + FLR 后 AON 存活），失败即
+拒绝并 FLR；无持久化、无刷写、断电即清。详见
+[docs/ada28e0-uefi-report.md](docs/ada28e0-uefi-report.md)。
 
 ## 仓库结构
 
