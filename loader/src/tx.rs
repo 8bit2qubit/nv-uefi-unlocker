@@ -899,17 +899,9 @@ pub fn run_transaction(gpu: &TxGpu, assets: &TxAssets, pci_handle: uefi::Handle)
     let radix = tb::radix_build(gpu, &assets.gsp_image)?;
 
     // WprMeta publication (first signature call) then fire.
-    let fb_size = (gpu.read32(0x0011_83a4)? as u64) << 20;
-    let vga = gpu.read32(0x0062_5f04)?;
-    let vga_offset = if vga & (1 << 3) != 0 {
-        let base = ((vga >> 8) as u64) << 16;
-        if base < fb_size - (1 << 20) { fb_size - 0x20000 } else { base }
-    } else {
-        fb_size - (1 << 20)
-    };
     {
         let meta = unsafe { core::slice::from_raw_parts_mut(meta_dma.host, tb::WPR_META_SIZE) };
-        tb::wpr_meta_pack(meta, &layout, fb_size, vga_offset, 1 << 20,
+        tb::wpr_meta_pack(meta, &layout, 1 << 20,
                           sig_dma.dev, sig_size as u64, radix.level0,
                           assets.gsp_image.len() as u64, boot_dma.dev, &boot)?;
     }

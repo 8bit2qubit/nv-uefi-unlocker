@@ -279,8 +279,6 @@ pub fn radix_build(gpu: &TxGpu, image: &[u8]) -> Result<RadixBlock, TxError> {
 pub fn wpr_meta_pack(
     meta: &mut [u8],
     layout: &LayoutOut,
-    fb_size: u64,
-    vga_offset: u64,
     frts_size: u64,
     signature_dma: u64,
     signature_size: u64,
@@ -289,6 +287,11 @@ pub fn wpr_meta_pack(
     boot_dma: u64,
     boot: &BootDesc,
 ) -> Result<(), TxError> {
+    // FB size and VGA reservation come from the layout that produced the
+    // offsets - they must not be re-read from the device here (the VGA
+    // register is gated on a non-console dGPU and a strict re-read EIO'd).
+    let fb_size = layout.fb_size;
+    let vga_offset = layout.vga_base;
     if signature_size == 0 || image_size == 0 || boot.image_size == 0
         || vga_offset >= fb_size
         || radix_dma & 4095 != 0 || boot_dma & 4095 != 0

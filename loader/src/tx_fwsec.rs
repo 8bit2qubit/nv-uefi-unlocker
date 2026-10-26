@@ -282,6 +282,11 @@ pub fn fwsec_patch_frts(image: &mut [u8], fw: &FwsecInfo, frts_offset: u64) -> R
 
 /// Layout register adapter (twin of the tested sim::layout).
 pub struct LayoutOut {
+    /// FB size and VGA reservation as read by the layout. The WprMeta needs
+    /// both again later; re-reading them there used to EIO on the (tolerated)
+    /// gated VGA register on a non-console dGPU.
+    pub fb_size: u64,
+    pub vga_base: u64,
     pub wpr_end: u64,
     pub frts_offset: u64,
     pub boot_offset: u64,
@@ -374,7 +379,17 @@ pub fn layout_from_registers(
         return Err(TxError::ERange);
     }
     info!("layout: fb={usable_fb:#x} vga={vga_base:#x} frts={frts:#x} wpr=[{wpr_start:#x},{wpr_end:#x}]");
-    Ok(LayoutOut { wpr_end, frts_offset: frts, boot_offset: boot, gsp_offset: gsp, heap_offset: heap_off, wpr_start, nonwpr_start })
+    Ok(LayoutOut {
+        fb_size: usable_fb,
+        vga_base,
+        wpr_end,
+        frts_offset: frts,
+        boot_offset: boot,
+        gsp_offset: gsp,
+        heap_offset: heap_off,
+        wpr_start,
+        nonwpr_start,
+    })
 }
 
 /// FWSEC ignition phase (unlock_610.c 921-1026, 1:1): read PROM, parse,

@@ -435,3 +435,29 @@ Two takeaways: (a) 0xffffffff at sample time is a decoder-off window,
 not a card identity, and must not be printed as "ok"; (b) pre-reset
 badf5620 on the GSP is the normal gated state and is reset away - the
 open risk for the 4050 is not that gating exists.
+
+## Run: 28a1 second silicon (v0.1.2) 2026-10-26 — FWSEC VERIFIED on 28a1, meta re-read EIO
+
+Hybrid state again (VGA gated, fallback value used). The transaction now
+passes layout and reaches - and completes - FWSEC:
+
+  layout fb=0x17fd00000 vga=0x17fc00000 (= fb-1MiB, the healthy path value)
+  FWSEC: PROM parse ok, mapper patched, GSP reset + unblock, portal image
+         placed, fuse v1 - WPR2 low=0x17fb000 high=0x17fbe00 VERIFIED
+  booter bundle ok (56832/768), radix 20563 leaves built
+  -> TX: transaction failed: EIO
+
+Root cause of the EIO: `run_transaction` re-read FB_SIZE and the VGA
+register with strict read32() for the WprMeta, right after the radix
+build. The layout fix only covered layout_from_registers, so the gated
+VGA register killed the transaction a second time - one step later.
+
+FIX (0.1.3): the layout result carries `fb_size` and `vga_base`;
+`wpr_meta_pack` takes them from the layout itself instead of re-reading
+the device. Remaining strict literal-offset reads audited: only the two
+fuse words, both proven readable on this run.
+
+Silicon conclusion: 4050/28a1 executes FWSEC on the GSP and provisions
+WPR2 with the AD10x asset family. The transaction is not limited by the
+card - the console-ownership gate only cost one register, and every
+other engine step behaved exactly as on 28e0.
