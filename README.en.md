@@ -76,8 +76,10 @@ the wall lifted it hits the thermal wall (Thrm) — **3045 MHz / 206.8 W /
 
 ### What the unlock actually is: disabled transistors back to work, not overclocking
 
-The clamped SM issue rate is a **physically disabled tensor datapath**
-(manufacturing segmentation) — unrelated to clocks, voltage or power walls.
+The clamped SM issue rate is a **periodically-stalled tensor datapath**
+(manufacturing segmentation: the cut lanes spin on NOP/stall slots in the
+instruction stream while the clock keeps ticking) — unrelated to clocks,
+voltage or power walls.
 Controlled experiment (RTX 4060 Laptop, ASUS ROG Strix G16 **G614JV**,
 FP16 tensor, same card and precision, the only variables being the issue
 rate and the power wall):
@@ -90,8 +92,10 @@ rate and the power wall):
 After the unlock the frequency **drops 3.7%** and power rises 34%, yet
 throughput rises **79%** — the extra FLOPs cannot come from clocks or
 power; they come from **the full transistor set no longer idling**: with
-the segmentation mask lifted, the number of tensor cores participating in
-issue per clock edge returns to the full design set. This is why
+the segmentation mask lifted, the stall slots that consumed NOPs every
+clock edge load real instructions again and the participating tensor-core
+count returns to the full design set — the power increase is the direct
+consequence of idling becoming work. This is why
 overclocking/over-power alone can never close the gap (stock at 3.0 GHz
 hitting no wall only reaches 35.9 T) while the unlock more than doubles
 throughput at a *lower* clock.
