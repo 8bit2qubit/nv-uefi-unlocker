@@ -37,9 +37,9 @@ chain with zero unlock writes.
 
 ### Procedure
 
-1. BIOS: disable Secure Boot; set the display mode to dGPU-only
-   (Ultimate/dedicated) — in hybrid/Optimus mode the EC puts the dGPU into
-   D3cold early in boot and the BAR0 VBIOS aperture becomes invisible.
+1. BIOS: disable Secure Boot. Pick the display mode / entry path from the
+   measured table below — **dGPU-only is recommended**; hybrid works only in
+   the one entry path where the dGPU is powered (see the analysis).
 2. Boot from the stick → banner → **press Space to confirm** (auto-returns
    to Windows after 30 s).
 3. Everything after that is automatic; the tool chains back into
@@ -56,6 +56,42 @@ chain with zero unlock writes.
 Regenerate the payload and all assets:
 `cargo run -p assets -- generate-ad102` / `release/make-usbroot.ps1`
 (reproducible from pinned SHA-256 610.43.03 public inputs, hard-verified).
+
+### Display mode x previous exit: measured availability (G614JV / 4060L / full MUX, 2026-10-26)
+
+| Previous exit | dGPU at this boot | This tool |
+| --- | --- | --- |
+| hybrid mode, iGPU-only shutdown | cold: no GOP, BAR0 all `0xffffffff` | ❌ claim preflight reports "dGPU powered off (D3cold)" |
+| hybrid mode, hybrid shutdown -> restart | hot: GOP present, registers readable | ✅ works end to end (four writes + selectors surviving FLR - the success log in evidence) |
+| hybrid mode, after sleep/wake | parked in D3, domains gated (VGA_WORKSPACE reads `0xbadf1301`) | ❌ like above |
+| dGPU-only, after sleep or restart | always panel owner, always powered | ✅ works in both |
+
+Operational rule: reboot from Windows with **Restart** (or cold-boot straight
+into the stick from the boot menu). Do not use the iGPU-only shutdown path and
+do not enter the stick right after a sleep/wake cycle.
+
+**Why (it is not the mode being better; it is whom the firmware POSTs for)**
+
+The firmware unconditionally runs VBIOS POST/devinit only on the GPU it needs
+for its own display:
+
+- With dGPU-only, the dGPU owns the panel. Every path - cold boot, warm reset,
+  S3/S4 resume - has to re-initialise it, so it stays powered, keeps its GOP
+  and its register domains stay readable. That is why sleep and restart both
+  work there.
+- In hybrid mode the iGPU can show the console, so the firmware only does a
+  best-effort job on the dGPU: cold boot and hybrid restart do POST it (hence
+  hybrid shutdown -> restart works, which is exactly the state of the 4060
+  success log), but
+  - an iGPU-only shutdown lets the EC cut dGPU power before POST (D3cold),
+    BAR0 reads all-ones;
+  - sleep resumes through the S3/S4 vector, not through POST: the firmware
+    does not re-run devinit, the EC keeps the dGPU in D3 and the PRI domains
+    stay gated - `0xbadf1301` at VGA_WORKSPACE is that gate projected into a
+    register.
+- This tool runs before any driver and has no ACPI interpreter, so it cannot
+  run `_PS0`/PR3 the way the Windows driver does. The three failing states can
+  only be avoided by choosing another entry path - not fixed in code.
 
 ## Combining with the nvoc kmd power-wall unlock
 
@@ -156,7 +192,7 @@ the kmod, our EFI path is structurally identical — expected compatible);
 | --- | --- | --- |
 | AD107 | 4060 Laptop **28e0** | ✅ verified (this repo) |
 | AD107 | 4060 2882 / 4060 Laptop 28a0 / 4050M 28e1 | 🟢 upstream-verified |
-| AD107 | 4050 Laptop **28a1** | 🟡 first silicon 2026-10-26: with the iGPU as console owner VGA workspace reads 0xbadf1301 and the layout used to reject it — now tolerated (fallback equals the healthy-card value); **make the dGPU the console (MUX to discrete)** and re-run, second half of the transaction still unproven on this ID |
+| AD107 | 4050 Laptop **28a1** | 🟡 two silicon runs 2026-10-26: the gated VGA value `0xbadf1301` is tolerated (fallback equals the healthy-card value), the second run **completed FWSEC on the GSP with WPR2 verified** (a first for this ID) and was then stopped by a second strict read for the WprMeta — 0.1.3 takes the values from the layout instead; nothing past the booter is proven on this ID |
 | AD106 | 4060Ti 2803 / 4060Ti 16G 2805 | 🟢 |
 | AD104 | 4070Ti 2782 / 4070S 2783 / 4070 2786 | 🟢 |
 | AD103 | 4080S 2702 / 4080 2704 / 4070TiS 2705 / 4070 2709 / 4090M 2757 | 🟢 |

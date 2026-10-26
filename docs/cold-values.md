@@ -83,6 +83,8 @@ VGA 读回正常 → layout 走 bit3=0 → vga=FB 顶；FWSEC WPR2 验证、boot
 选择器穿 FLR）。因此 0xbadf1301 的关联量是"**dGPU 是否是 console owner**"而不是"混合模式"：
 dGPU 主显时该寄存器正常，iGPU 占 console 时被门控。第三种状态是 iGPU-only 关机——
 dGPU 冷、无 GOP、BAR0 全 0xffffffff（claim 前采样即此现象，claim 后仍全 1 即 D3cold）。
+混合模式下的第四种：休眠/唤醒后 dGPU 停在 D3（resume 不走 POST、不跑 devinit），
+同样读到 0xbadf1301；独显直连则休眠与重启均正常。
 
 **修复**：`layout_from_registers` 的五个输入改 raw 读，FB/MMU 锁仍严格拒毒，
 仅 VGA workspace 容毒并回退（log 打出原值与 MUX 提示）。教训沿用 §3.3：毒值先分桶再

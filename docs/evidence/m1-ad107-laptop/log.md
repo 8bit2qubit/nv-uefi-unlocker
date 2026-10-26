@@ -461,3 +461,17 @@ Silicon conclusion: 4050/28a1 executes FWSEC on the GSP and provisions
 WPR2 with the AD10x asset family. The transaction is not limited by the
 card - the console-ownership gate only cost one register, and every
 other engine step behaved exactly as on 28e0.
+
+## Display-mode matrix, 28e0, full-MUX G614JV (user-run, 2026-10-26)
+
+  hybrid, iGPU-only shutdown -> dGPU cold, no GOP            -> tool fails at preflight
+  hybrid, hybrid shutdown -> restart -> dGPU hot, has GOP    -> full chain (control log)
+  hybrid, after sleep/wake -> dGPU in D3, domains gated      -> tool fails (0xbadf1301)
+  dGPU-only, after sleep or restart -> always powered/owner  -> works in both
+
+Mechanism: the firmware POSTs/devinit only the GPU it uses for its own
+display. dGPU-only makes every path (cold, warm reset, S3/S4 resume)
+re-initialise it; hybrid makes it best-effort, so the iGPU-only path cuts
+power before POST and the sleep path resumes without devinit. The tool has
+no ACPI interpreter to run _PS0/PR3 itself. Documented in both READMEs;
+operation rule = Restart from Windows, never sleep/wake into the stick.

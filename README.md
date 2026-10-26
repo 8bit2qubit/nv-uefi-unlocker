@@ -36,8 +36,8 @@ FP16 GEMM 29.89 → 49.33 TFLOPS（1.65×）。完整报告见
 
 ### 操作流程
 
-1. BIOS：关 Secure Boot、显示模式切独显直连（dGPU only/Ultimate）——
-   混合模式下 EC 会在早期把 dGPU 置于 D3cold，BAR0 VBIOS aperture 不可见。
+1. BIOS：关 Secure Boot。显示模式/进入方式按下面的实测表选——**推荐独显直连**，
+   混合模式只在"重启、且 dGPU 有电"这一种进入方式下可用（见原因分析）。
 2. U 盘启动 → 版本屏 → **空格确认**（30 秒无操作自动回 Windows）。
 3. 之后全自动：事务完成或失败都会自动链回 bootmgfw 进 Windows，全程日志
    落 U 盘 `\loader.log`。引导器查找顺序固定为 **bootmgfw → 各发行版
@@ -49,6 +49,32 @@ FP16 GEMM 29.89 → 49.33 TFLOPS（1.65×）。完整报告见
 V67 payload 与全部资产再生成：`cargo run -p assets -- generate-ad102` /
 `release/make-usbroot.ps1`（从钉 SHA-256 的 610.43.03 公开输入本地再生，
 产物 hash 硬校验；期望值见报告哈希表）。
+
+### 显示模式 × 上次离开方式：可用性实测（G614JV / 4060L / 三模完整支持，2026-10-26）
+
+| 上次离开方式 | 本次启动后的 dGPU | 本工具 |
+| --- | --- | --- |
+| 混合模式 · 纯 iGPU 关机 | 冷：无 GOP，BAR0 全 `0xffffffff` | ❌ claim 前置即报 "dGPU powered off (D3cold)" |
+| 混合模式 · 混合关机 → 重启 | 热：有 GOP，寄存器可读 | ✅ 全链跑通（四写 + 选择器穿 FLR，即 evidence 里的成功日志） |
+| 混合模式 · 休眠/唤醒之后 | 停在 D3、域门控（VGA_WORKSPACE 读回 `0xbadf1301`） | ❌ 同上 |
+| 独显直连 · 休眠或重启 | 始终是 panel owner、始终有电 | ✅ 均可用 |
+
+操作建议：**从 Windows 选"重启"**（或冷启后直接从启动菜单进 U 盘）再运行；不要用
+"关机再开"的 iGPU-only 路径，也不要在休眠唤醒后直接进 U 盘。
+
+**原因分析（不是模式好坏，而是固件为谁无条件跑 POST）**
+
+固件只在"自己要用来显示的那块 GPU"上无条件执行 VBIOS POST/devinit：
+
+- 独显直连时 dGPU 是 panel owner。冷启、热重启、S3/S4 唤醒后的任何路径，固件都必须
+  重新初始化它，dGPU 一直有电、有 GOP、寄存器域可读——所以这里休眠和重启都可用。
+- 混合模式下 iGPU 能承担显示，固件对 dGPU 只是尽力而为：冷启与混合重启路径会 POST
+  它（因此"混合关机→重启"可用，这也正是那份 4060 成功日志的状态）；但
+  - 纯 iGPU 关机会让 EC 在 POST 之前就断掉 dGPU 供电（D3cold），BAR0 全 1；
+  - 休眠走的是 resume 路径而不是 POST：固件不重跑 devinit，EC 把 dGPU 停在 D3，
+    PRI 域门控——VGA_WORKSPACE 读回 `0xbadf1301` 就是它在寄存器层的投影。
+- 本工具在驱动加载前工作，没有 ACPI 解释器，无法像 Windows 驱动那样跑
+  `_PS0`/PR3 给卡上电，因此这三种失败态只能靠换进入方式规避，不能靠代码绕过。
 
 ## 与 nvoc kmd 功耗墙解锁配合使用
 
@@ -141,7 +167,7 @@ claim(断 GOP/驱动+独占) → scrubber(BSI handoff 1→3) → FWSEC-FRTS(WPR2
 | --- | --- | --- |
 | AD107 | 4060 Laptop **28e0** | ✅ 实测（本报告） |
 | AD107 | 4060 2882 / 4060 Laptop 28a0 / 4050M 28e1 | 🟢 上游硅验证（28e1 为 2.00× 实测报告） |
-| AD107 | 4050 Laptop **28a1** | 🟡 已实机（2026-10-26）：iGPU 占 console 时 VGA workspace 读回 0xbadf1301 曾被 layout 拒掉，已改为容毒回退（同一回退值=健康卡路径）；**需让 dGPU 做 console（MUX 切独显直连）**后重跑，事务后半段尚无硅证据 |
+| AD107 | 4050 Laptop **28a1** | 🟡 已实机两次（2026-10-26）：VGA workspace 门控值 `0xbadf1301` 已容毒回退（回退值=健康卡路径），第二次运行 **FWSEC 在 GSP 成功、WPR2 读回验证**（该 ID 首次），随后被 WprMeta 的二次严格读挡住——0.1.3 已改为从 layout 取值；booter 之后仍无硅证据 |
 | AD106 | 4060Ti 2803 / 4060Ti 16G 2805 | 🟢 上游硅验证 |
 | AD104 | 4070Ti 2782 / 4070S 2783 / 4070 2786 | 🟢 上游硅验证 |
 | AD103 | 4080S 2702 / 4080 2704 / 4070TiS 2705 / 4070 2709 / 4090M 2757 | 🟢 上游硅验证 |
