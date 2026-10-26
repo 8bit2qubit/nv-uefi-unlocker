@@ -1,0 +1,25 @@
+[INFO ] loader::logging: log file \loader.log opened on boot volume
+[INFO ] loader::logging: nv-uefi-unloader v0.1.0 (M0 skeleton: read-only)
+[INFO ] loader::banner: ==================================================
+[INFO ] loader::banner:  nv-uefi-unlocker v0.1.0
+[INFO ] loader::banner:  M0 skeleton: read-only enumerate + chain-load
+[INFO ] loader::banner:  console output only; no GPU writes by design
+[INFO ] loader::banner: ==================================================
+[INFO ] loader::banner: PHASE: CONFIRM
+[INFO ] loader: CONFIRM: 30s timeout, proceeding (M0 read-only default)
+[INFO ] loader::pci: PHASE: ENUMERATE (read-only)
+[INFO ] loader::pci: ENUMERATE: 5 PciIo handles
+[INFO ] loader::pci: PCI 0000:00:00.0 8086:29c0 class 000600
+[INFO ] loader::pci: PCI 0000:00:01.0 1234:1111 class 000300
+[INFO ] loader::pci: PCI 0000:00:1f.0 8086:2918 class 000601
+[INFO ] loader::pci: PCI 0000:00:1f.2 8086:2922 class 000106
+[INFO ] loader::pci: PCI 0000:00:1f.3 8086:2930 class 000c05
+[INFO ] loader::gop: PHASE: GOP-PROBE (read-only)
+[INFO ] loader::gop: GOP-PROBE: 2 GOP handles
+[INFO ] loader::gop: GOP handle Handle(0x1e661e18): 1280x800 Bgr
+[INFO ] loader::gop: GOP handle Handle(0x1e7a6f18): 1280x800 Bgr
+[INFO ] loader::chainload: PHASE: CHAIN
+[INFO ] loader::chainload: CHAIN: 1 SimpleFileSystem handles
+[INFO ] loader::chainload: CHAIN: bootmgfw not found on any filesystem
+[INFO ] loader: CHAIN: failed: NOT_FOUND
+[INFO ] loader: FINAL: M0 has nothing to write, nothing to restore. Safe to power off or reboot.

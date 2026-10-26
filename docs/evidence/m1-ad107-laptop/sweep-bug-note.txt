@@ -1,0 +1,1 @@
+NOTE: interleaved 0x00000000 lines were misaligned-read artifacts (Range<u32> iterated bytewise; 36 reads returned UNSUPPORTED, error-logged, value stayed 0). Aligned dwords above are the real sweep; fix committed post-run with step_by(4) + BADF_VARIANT bucket + read-error counting.

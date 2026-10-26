@@ -1,0 +1,9 @@
+[package]
+name = "sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Behavioral fake-MMIO GPU model + transaction scenarios (GPL-2.0-only behavior port of gpu-unlock tests)"
+
+[lib]
+path = "src/lib.rs"

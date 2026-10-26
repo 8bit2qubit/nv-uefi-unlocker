@@ -1,0 +1,38 @@
+[INFO ] loader::sample: PHASE: SAMPLE (M1 read-only cold state)
+[INFO ] loader::sample: SAMPLE: GPU 10de:28e0 @ 0000:01:00.0
+[INFO ] loader::sample: SAMPLE PMC_BOOT_0 chip-id = 0x197000a1 [ok]
+[INFO ] loader::sample: SAMPLE FB_SIZE_MIB 0x1183a4 = 0x00001ffc [ok]
+[INFO ] loader::sample: SAMPLE VGA_WORKSPACE 0x625f04 = 0x00000001 [ok]
+[INFO ] loader::sample: SAMPLE GFW_PLM 0x118128 = 0x00008b8f [ok]
+[INFO ] loader::sample: SAMPLE GFW_SCRATCH 0x118234 = 0x000003ff [ok]
+[INFO ] loader::sample: SAMPLE GSP_CPUCTL 0x110100 = 0x00000010 [ok]
+[INFO ] loader::sample: SAMPLE MMU_PLM 0x1fa7c8 = 0x0045cb8f [ok]
+[INFO ] loader::sample: SAMPLE MMU_LOCK_LO 0x1fa82c = 0x00100000 [ok]
+[INFO ] loader::sample: SAMPLE MMU_LOCK_HI 0x1fa830 = 0x01efbff0 [ok]
+[INFO ] loader::sample: SAMPLE WPR2_LO 0x1fa824 = 0x1ffffe00 [ok]
+[INFO ] loader::sample: SAMPLE WPR2_HI 0x1fa828 = 0x00000000 [ok]
+[INFO ] loader::sample: SAMPLE SEC2_CPUCTL 0x840100 = 0xbadf5620 [ok]   <-- badf VARIANT (0x56xx), classifier pre-fix showed [ok]
+[INFO ] loader::sample: SAMPLE FUSE_OPT_FEAT_OVR_DISABLE 0x8203f0 = 0x00000000 [ok]
+[INFO ] loader::sample: SAMPLE FUSE_VER 0x824140 = 0x00000001 [ok]
+[INFO ] loader::sample: SAMPLE FUSE_VER_DECODE 0x8241c0 = 0x00000001 [ok]
+[INFO ] loader::sample: SAMPLE AD1xx CYA 0x88724 = 0x0000002d [ok]
+[INFO ] loader::sample: SAMPLE AD1xx CFG 0x88dcc = 0x80000007 [ok]
+[INFO ] loader::sample: SAMPLE AD1xx XVE_PLM 0x88ff4 = 0xffffff8f [ok]
+[INFO ] loader::sample: SAMPLE AD1xx BAR1_CAP_MIRROR 0x88bbc = 0x0003fc00 [ok]
+[INFO ] loader::sample: SAMPLE FEAT sweep 0x823800-0x82382f+0x823b00: 49 ok / 0 badf   <-- pre-fix summary; stride bug below
+[INFO ] loader::sample: SAMPLE FEAT 0x823800 = 0xffffff8f [ok]
+[INFO ] loader::sample: SAMPLE FEAT 0x823804 = 0xffffff8f [ok]
+[INFO ] loader::sample: SAMPLE FEAT 0x823808 = 0x00000182 [ok]
+[INFO ] loader::sample: SAMPLE FEAT 0x82380c = 0x00888888 [ok]
+[INFO ] loader::sample: SAMPLE FEAT 0x823810 = 0x00aaaaaa [ok]
+[INFO ] loader::sample: SAMPLE FEAT 0x823814 = 0x00000233 [ok]
+[INFO ] loader::sample: SAMPLE FEAT 0x823818 = 0x00410080 [ok]
+[INFO ] loader::sample: SAMPLE FEAT 0x82381c = 0x17142071 [ok]
+[INFO ] loader::sample: SAMPLE FEAT 0x823820 = 0x00000004 [ok]
+[INFO ] loader::sample: SAMPLE FEAT 0x823824 = 0x00000000 [ok]
+[INFO ] loader::sample: SAMPLE FEAT 0x823828 = 0x00000001 [ok]
+[INFO ] loader::sample: SAMPLE FEAT 0x82382c = 0x0000000a [ok]
+[INFO ] loader::sample: SAMPLE FEAT 0x823b00 = 0x00004b8f [ok]
+[INFO ] loader::sample: SAMPLE FEAT_READOUT_1 = 0x00410080 (0 = no compute throttle active)
+[INFO ] loader::sample: SAMPLE NV_PROM first 0x10000 bytes: crc32 0xd4a7daa2, magic 0xeb7eaa55
+[INFO ] loader::sample: SAMPLE complete (read-only, nothing restored because nothing touched)

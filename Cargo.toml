@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["loader", "assets", "sim"]
+# loader is an x86_64-unknown-uefi binary and cannot build for the host
+# triple; plain `cargo build` therefore only covers the host-side crates.
+# Build the EFI app with `cargo efi` (see .cargo/config.toml).
+default-members = ["assets", "sim"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+
+[profile.release]
+lto = true

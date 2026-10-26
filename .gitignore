@@ -1,0 +1,28 @@
+# external reference clones (see AGENTS.md §4)
+/reference/
+
+# rust
+/target/
+**/*.rs.bk
+
+# asset pipeline: NVIDIA-derived blobs never enter git (constitution §6)
+/assets/in/
+/assets/out/
+/assets/work/
+*.rom
+*.bin
+gsp_ga10x*
+firmware-*.run
+nvidia-utils*.tar.*
+
+# keys / decrypted / generated payloads never enter git
+*.key
+*.pem
+payload_*
+
+# qemu runtime artifacts (evidence copies live under docs/evidence/)
+/sim/qemu/run/
+/sim/qemu/usbroot/
+
+# qemu disk image (test fixture, may contain firmware copies)
+/sim/qemu/usb.img

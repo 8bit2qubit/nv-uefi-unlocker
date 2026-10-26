@@ -1,0 +1,5 @@
+# Evidence-as-commits: binary-exact across platforms (AGENTS.md §5)
+docs/evidence/** -text
+*.log -text
+*.dump -text
+*.jsonl -text

@@ -1,0 +1,139 @@
+# RTX 4060 Laptop（10de:28e0）：Windows UEFI 预驱动四写解锁
+
+2026-10-26，一台 ASUS ROG Strix G16 G614JV（RTX 4060 Laptop GPU，`10de:28e0`，
+AD107M，20 SM，8 GiB，rev a1，BIOS 独显直连模式）。全流程一次冷启动完成。
+
+**结果**：本仓库的 UEFI 应用（`BOOTX64.EFI`，Rust + uefi-rs，x86_64-unknown-uefi）
+在 NVIDIA 驱动加载之前完成了完整的事务链——SEC2 scrubber（BSI handoff 1→3）、
+FWSEC-FRTS 点火（WPR2 建立）、stock Booter 经正确签名的 HS 引导启动 GSP-RM
+（MAILBOX0=0）——随后在同一事务内执行 **V67 四写 payload** 并全部读回验证：
+
+| 写入目标 | 解锁前 | 写入值 | 解锁后读回 |
+| --- | --- | --- | --- |
+| `0x823804` FEAT PLM | `0xffffff8f` | `0xffffffff` | `0xffffffff` ✅ |
+| `0x1fa7cc` WPR_CFG PLM | `0x0004cb8f` | `0xfffff0ff` | `0xfffff0ff` ✅ |
+| `0x9a0148` FBPA PLM（观察项） | `0xffffff0f` | `0xffffffff` | `0xffffff0f`（与 2705/2805/28e1 一致，非致命） |
+| `0x1fa7c4` WPR PLM | `0x0004cb8f` | `0xffffffff` | `0xffffffff` ✅ |
+
+payload marker `0x67b00001` 出现在 SEC2 MAILBOX0（ROP 执行证明）；
+宿主侧 selector 写入 `SS0=0x88888888` / `SS1=0x8` 成功并读回（PLM 开启后主机写
+首次生效）；FLR 后 selector 存活（AON 岛）；stock 签名在 FLR 前还原（永不把
+payload 留给后续原厂引导）；全流程干净交棒 Windows。
+
+**Windows 侧实测**（cli-stressor-rs，FP16 GEMM 4096，resident L2）：
+
+| 状态 | 等效吞吐 | 倍率 |
+| --- | --- | --- |
+| stock | 29.89 TFLOPS | 1.00× |
+| 解锁后 | 49.02 – 49.33 TFLOPS | **1.65×** |
+
+1.65× 低于 28e1 报告的 2.00× 属预期：该倍率出自纯 tensor 发射速率微基准，
+真实 4096 GEMM 含访存/累加/epilogue 分量，稀释倍率。解锁后绝对吞吐
+（49.3 TF）与 28e1 的 52.97 TF 同档（时钟差异）。数据完整性自检
+（pattern_clean / injection_capture）全绿。
+
+本卡（28e0）此前未被社区验证——最近的公开 canary 是 28e1（同芯片、同为
+ASUS 移动端）。本报告将其补上。解锁为易失性质：每次冷启动经 U 盘重放一次，
+无持久化、无刷写、断电即清。
+
+## 与 Linux kmod 路径的差异（为什么这条链不同）
+
+gpu-unlock / gpu-unlock-ada 的 Linux 方案在 initramfs kmod 中执行，SEC2 的
+Falcon DMA 引擎可用。Windows 的等价时窗是 UEFI DXE 阶段，实测发现该窗口内
+两台引擎的 Falcon DMA 队列"接受 64 命令（2×32 槽）但从不消费"，且与 VT-d、
+FBIF 配置、REQUIRE_CTX 均无关。本仓库因此以**寄存器 portal 装载**替代全部
+DMA 装载（IMEMC/DMEMC 字节地址直写），这也是 Turing 内核装载 Booter 的原生
+方式。此外本窗口内 BSI handoff 停在 1（非 DONE），内核驱动的
+`kgspExecuteScrubberIfNeeded` 路径在 kmod 中从不触发——我们移植了它（内核
+同款 SecurescrubUcode BINDATA）并实测 scrubber 执行后 handoff 推进到 3。
+
+## 链条分步（15 步，全部真机读回）
+
+| # | 步骤 | 状态 |
+| --- | --- | --- |
+| 1 | 枚举/认领（GOP+驱动断开、独占、IO/MEM/BME） | ✅ |
+| 2 | 入口门（chip / WPR2 hi=0 / FEAT=0xffffff8f / SS 合理） | ✅ |
+| 3 | VBIOS PROM 读（BAR0+0x300000，1 MiB aperture） | ✅ |
+| 4 | FWSEC 抽取/解析/签名槽/FRTS 补丁 | ✅ |
+| 5 | 布局计算（fb/vga/mmu-lock → WPR 五段，84 MiB 镜像槽） | ✅ |
+| 6 | FWSEC 点火（HS@GSP portal + BROM 参数）→ WPR2 立起 | ✅ 可复现 |
+| 7 | SEC2 scrubber（内核同款 BINDATA）→ handoff 1→3 | ✅ 可复现 |
+| 8 | GFW 状态评估 | ✅ |
+| 9 | Booter 资产（BTL1 解析 + stock 签名槽） | ✅ |
+| 10 | GSP-RM 装载准备（radix3 84 MiB + WprMeta + 签名 DMA） | ✅ |
+| 11 | **Booter 点火**（HS@SEC2 portal + BROM 参数 + 邮箱=WprMeta） | ✅ MAILBOX0=0 |
+| 12 | 执行判据（回放=mailbox0+WPR2；payload=四 PLM+marker） | ✅ |
+| 13 | 签名还原（payload 模式，FLR 前） | ✅ |
+| 14 | FLR（TOTORONG 工艺：devctl 保留、pending 等待、100 ms 静默、BAR 恢复） | ✅ |
+| 15 | 交棒（FLR 后 selector 存活验证 → bootmgfw 链回） | ✅ |
+
+## 本仓库实现的关键修复（对后来者最有价值的部分）
+
+1. **Falcon v4 portal 地址编码**：`IMEMC/DMEMC` 的地址字段就是**字节地址
+   本身**（OFFS[7:2] + BLK[23:8] 原样落在寄存器 bits[23:2]；权威定义
+   `dev_falcon_v4.h`，内核 `kflcnMaskImemAddr/DmemAddr = addr & (OFFS|BLK)`）。
+   按 `addr>>2` 写会把 IMEM 第 k 块放到字节 64k（每 4 块互相覆盖），非零地址
+   的 DMEM 读也偏 4 倍。零地址操作会掩盖此 bug。
+2. **BootFromHs 只装载 secure 段且物理目标为 0**（`dest=imemPa=0`，虚拟 tag
+   从 imemVa 取；镜像的 NS/os-code 段**不装载**）。把 NS 段装在物理 0、sec 段
+   装在 0x100 并打重复 tag 会让核心从引导向量取到 NS 垃圾后立即异常停机
+   （特征：EXCI 0x0100、TRACEPC 钉在 0x100、MAILBOX 不变）。
+3. **SEC2 scrubber 用内核同款 BINDATA**（`g_bindata_ksec2GetBinArchiveSecurescrubUcode_AD10X`，
+   7424 B、ucode 0xd、2×RSA-384），不是 VBIOS PROM 的 app 0x49（22528 B）。
+   签名槽熔丝寄存器 = `0x00824140 + 4*(ucodeId-1)`，版本 = 最高置位位 +1。
+4. **每次 HS 执行前必须有引擎复位**：scrubber 成功后 BSI 状态机会重新锁
+   SEC2 的 PRI 窗口（读回 badf5620），复位重新打开它。BCR 切换后**不能**再补
+   复位周期（实测会把切换抹回 0x110 并挂死 scrub 等待）。
+5. **Falcon DMA 在本窗口不可用是引擎私有状态**：FBIF 三件套
+   （`FBIF_CTL|1<<7`、`DMACTL=0`、`TRANSCFG(0)=5`）修完、REQUIRE_CTX=0、
+   VT-d 关闭后队列仍"接受 64 命令不消费"。不要在此浪费时间——portal 路径
+   完全等效（内核对 Turing Booter 本身就用 portal）。
+6. **payload 签名拓扑**：镜像永远打 stock 签名（BROM 先验签放行 booter）；
+   V67 blob（0xFA00=64000 B）住在独立签名 DMA 缓冲，WprMeta 的
+   `sizeOfSignature=0xFA00` 使 booter 自身的无界签名拷贝溢出 DMEM 栈——
+   溢出即 ROP 入口。0xFA00 装不进任何 booter 镜像，不要尝试打进镜像。
+
+## 运维事实
+
+- 解锁易失：每次冷启动 U 盘重放一次（EFI + `\v67-ad102-four-plm.bin`
+  即解锁模式；去掉该文件为纯回放/诊断模式）。
+- 失败路径与回放相同：判据不满足 → 拒绝 → FLR 交还冷卡 → Windows。
+  黑屏/STOP → 断电（笔记本按厂商流程放空 EC，ASUS 为按住电源 40 s），
+  同一会话绝不重试。
+- 热重启后的存活情况未测（社区同样未测）。
+
+## 安全边界
+
+本仓库遵循与上游相同的纪律：NVIDIA 固件 blob、密钥、解密产物、生成的
+payload 永不入库；一切资产从钉 SHA-256 的公开输入本地再生；写操作分级门控
+（M1 零写 / M3 事务 / M4 载荷单独立项）；先模拟后真机；读回是唯一成功判据。
+完整宪法见仓库根 `AGENTS.md` §1。
+
+## 社区贡献与参照源
+
+本项目是社区工作的直接受益者与衍生者，按依赖与影响排序：
+
+- **[gpu-unlock](https://github.com/Zagitta/gpu-unlock)**（Zagitta，GPL-2.0）：
+  GA10x kmod 权威范本。`unlock_610.c` 是本仓库事务链的移植母本
+  （falcon_reset/HS 启动/WprMeta/FLR），`layout_610.c` 是布局算法原版。
+- **[gpu-unlock-ada](https://github.com/JustAResearcher/gpu-unlock-ada)**
+  （JustAResearcher 及全部卡片报告贡献者，GPL-2.0）：AD10x 四写链与审计纪律
+  的源头。特别感谢 **Windroid234** 的 28e1 报告——与本卡一 ID 之差的完整
+  实测（2.00×、稳定性验证、OEM 注意事项），是本项目 M4 立项的直接依据；
+  以及 2705/2805/2882/28a0 等全部 canary 报告作者。
+- **[cmp170hx](https://github.com/Consensus-Protocol/cmp170hx)**
+  （Consensus-Protocol）：PLM 语义、四写表、SS0/SS1、"读回是唯一判据"方法论。
+- **[cmp90hx-unlock](https://github.com/WildFlash1st/cmp90hx-unlock)**
+  （WildFlash1st）：GA102 V67 链源头（rejoin15 补丁集）。
+- **[AD103_win_unlocker](https://huggingface.co/TOTORONG/AD103_win_unlocker)**
+  （TOTORONG）：Windows EFI 载具工艺的唯一公开先例——GOP 断连/交棒纪律、
+  FLR 与 PCI 恢复时序、 containment 设计均对照其对齐。
+- **[open-gpu-kernel-modules](https://github.com/NVIDIA/open-gpu-kernel-modules)**
+  （NVIDIA，MIT；本仓库钉 610.43.03 源包）：Turing/Ada 引导路径的一手权威
+  （kernel_gsp_tu102/falcon/booter/frts、BINDATA、BCR/BROM 寄存器定义）。
+- **[envytools](https://github.com/envytools/envytools)**：falcon 寄存器与
+  ISA 文档。
+- Rust 生态：`uefi-rs`、`miniz_oxide`、`crc32fast`、`sha2`。
+
+许可：**GPL-2.0-only**（与上游一致；见 `LICENSE`）。NVIDIA 固件与 VBIOS
+版权归 NVIDIA，按其原许可条款从钉版公开包本地再生，不在本仓库分发。

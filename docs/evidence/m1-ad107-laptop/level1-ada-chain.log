@@ -1,0 +1,10 @@
+[INFO ] loader::sample: SAMPLE ADA WPR_PLM 0x1fa7c4 = 0x0004cb8f [ok]
+[INFO ] loader::sample: SAMPLE ADA WPRCFG_PLM 0x1fa7cc = 0x0004cb8f [ok]
+[INFO ] loader::sample: SAMPLE ADA FBPA_PLM 0x9a0148 = 0xffffff0f [ok]
+[INFO ] loader::sample: SAMPLE SEC2_CPUCTL 0x840100 = 0xbadf5620 [BADF_VARIANT]
+[INFO ] loader::sample: SAMPLE FEAT 0x823804 = 0xffffff8f [ok]   (locked baseline, boot3)
+[INFO ] loader::sample: SAMPLE FEAT 0x823818 = 0x00410080 [ok]   (READOUT stable across boot1/2/3)
+[INFO ] loader::sample: SAMPLE FEAT 0x82381c = 0x04140071 [ok]   (SS0 cold drift, 3rd distinct value)
+[INFO ] loader::sample: SAMPLE FEAT 0x823820 = 0x00000004 [ok]
+[INFO ] loader::sample: SAMPLE FEAT sweep ... (dword stride): 13 ok / 0 badf / 0 read-errors  (dup-count fix live-verified)
+[INFO ] loader::sample: SAMPLE NV_PROM first 0x10000 bytes: crc32 0xd4a7daa2, magic 0xeb7eaa55  (3rd boot, same card identity)

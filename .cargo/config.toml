@@ -1,0 +1,8 @@
+[alias]
+# EFI loader (release, UEFI target) -> target/x86_64-unknown-uefi/release/loader.efi
+efi = "build --release -p loader --target x86_64-unknown-uefi"
+efi-debug = "build -p loader --target x86_64-unknown-uefi"
+# host-side crates + all tests
+xt = "test --workspace --exclude loader"
+# gated transaction build (GPU-write paths; flash only with the explicit user go)
+efi-tx = "build --release -p loader --target x86_64-unknown-uefi --features tx"

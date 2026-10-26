@@ -1,0 +1,21 @@
+[package]
+name = "assets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pinned-asset pipeline: fetch, verify, extract, generate (host-side)"
+
+[[bin]]
+name = "assets"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+sha2 = "0.10"
+crc32fast = "1"
+miniz_oxide = "0.9.1"
+tar = "0.4.46"
+xz2 = "0.1.7"
+zstd = "0.14.3"

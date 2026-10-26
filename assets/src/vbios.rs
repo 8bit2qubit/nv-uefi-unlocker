@@ -1,0 +1,338 @@
+//! VBIOS BIT -> falcon ucode table -> FWSEC descriptor parser.
+//!
+//! Ported 1:1 from open-gpu-kernel-modules
+//! src/nvidia/src/kernel/gpu/gsp/kernel_gsp_fwsec.c (first-hand authority;
+//! BIT header/token walk, expansion-ROM relocation, descriptor V2/V3).
+//! Regression anchor: NVOC's TU106 `1.rom` measurements (docs
+//! reverse-engineering/vbios/tu106-fwsec-ucode-decode.md).
+
+#[derive(Debug)]
+pub enum VbiosError {
+    NotAVbios,
+    BitHeaderNotFound,
+    BadChecksum,
+    NoFalconTable,
+    NoFwsecEntry { debug: bool },
+    UnsupportedDescVersion(u8),
+    Truncated,
+}
+
+impl std::fmt::Display for VbiosError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAVbios => write!(f, "not a VBIOS image (no 0xAA55)"),
+            Self::BitHeaderNotFound => write!(f, "BIT header not found"),
+            Self::BadChecksum => write!(f, "BIT header checksum mismatch"),
+            Self::NoFalconTable => write!(f, "falcon ucode table (token 0x70 v2) not found"),
+            Self::NoFwsecEntry { debug } => write!(f, "no FWSEC_{} entry", if *debug { "DBG" } else { "PROD" }),
+            Self::UnsupportedDescVersion(v) => write!(f, "unsupported descriptor version {v}"),
+            Self::Truncated => write!(f, "image truncated"),
+        }
+    }
+}
+
+pub const APP_ID_PRE_OS: u8 = 0x01;
+pub const APP_ID_FIRMWARE_SEC_LIC: u8 = 0x05;
+pub const APP_ID_FWSEC_DBG: u8 = 0x45;
+pub const APP_ID_FWSEC_PROD: u8 = 0x85;
+
+fn u8v(d: &[u8], o: usize) -> Option<u8> {
+    d.get(o).copied()
+}
+fn u16v(d: &[u8], o: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(d.get(o..o + 2)?.try_into().ok()?))
+}
+fn u32v(d: &[u8], o: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(d.get(o..o + 4)?.try_into().ok()?))
+}
+
+/// Expansion-ROM relocate, kernel semantics (kernel_gsp_vbios_tu102.c
+/// s_locateExpansionRoms): walk PCI data structures with the NVIDIA "NPDE"
+/// extension's SUBIMAGE_LEN as the chaining stride, find the code-type-0xE0
+/// (VBIOS_EXT) image; expansionRomOffset = ext_image_offset - base_image_size.
+/// Verified: TU106 1.rom -> 0x11600 (NVOC-measured adjust); ASUS AD107M
+/// 9507.1640 -> 0x14e00.
+pub fn find_expansion_offset(image: &[u8]) -> Result<usize, VbiosError> {
+    if u16v(image, 0).ok_or(VbiosError::NotAVbios)? != 0xAA55 {
+        return Err(VbiosError::NotAVbios);
+    }
+    let mut curr = 0usize;
+    let mut base_size: Option<usize> = None;
+    for _ in 0..16 {
+        let pcir = match u16v(image, curr + 0x18) {
+            Some(p) => p as usize,
+            None => break,
+        };
+        let p = curr + pcir;
+        match image.get(p..p + 4) {
+            Some(b"PCIR") | Some(b"NPDS") | Some(b"RGIS") => {}
+            _ => break,
+        }
+        let slen = u16v(image, p + 0x0a).unwrap_or(0) as usize;
+        let imglen = u16v(image, p + 0x10).unwrap_or(0) as usize;
+        let code = u8v(image, p + 0x14).unwrap_or(0);
+        let mut sub = imglen;
+        // NVIDIA PCI Data Extension: SUBIMAGE_LEN overrides the stride.
+        let npde_at = p + slen + 0xf & !0xf;
+        if image.get(npde_at..npde_at + 4) == Some(b"NPDE".as_slice()) {
+            let rev = u16v(image, npde_at + 4).unwrap_or(0);
+            if rev == 0x10 || rev == 0x11 {
+                sub = u16v(image, npde_at + 8).unwrap_or(0) as usize;
+            }
+        }
+        if code == 0xE0 {
+            let base = base_size.ok_or(VbiosError::BitHeaderNotFound)?;
+            return Ok(curr - base);
+        }
+        if code == 0x00 && base_size.is_none() {
+            base_size = Some(sub * 512);
+        }
+        if sub == 0 || curr + sub * 512 + 0x20 > image.len() {
+            break;
+        }
+        curr += sub * 512;
+    }
+    Err(VbiosError::BitHeaderNotFound)
+}
+
+/// BIT header location: scan for 0xB8FF + "BIT\0" with a zero-sum header
+/// checksum (kernel_gsp_fwsec.c s_vbiosFindBitHeader).
+pub fn find_bit_header(image: &[u8]) -> Result<usize, VbiosError> {
+    let mut addr = 0usize;
+    while addr + 12 <= image.len() {
+        if u16v(image, addr) == Some(0xB8FF) && &image[addr + 2..addr + 6] == b"BIT\0" {
+            let header_size = u8v(image, addr + 8).unwrap_or(0) as usize;
+            if header_size >= 12 && addr + header_size <= image.len() {
+                let sum: u32 = image[addr..addr + header_size].iter().map(|&b| b as u32).sum();
+                if sum & 0xFF == 0 {
+                    return Ok(addr);
+                }
+            }
+        }
+        addr += 2;
+    }
+    Err(VbiosError::BitHeaderNotFound)
+}
+
+pub struct UcodeEntry {
+    pub app_id: u8,
+    pub target_id: u8,
+    pub desc_off: u32, // relative to expansion image
+}
+
+/// Walk BIT -> token 0x70 (falcon data v2) -> ucode table.
+/// Returns (entries, expansion_offset, table_abs_offset).
+pub fn find_ucode_table(image: &[u8]) -> Result<(Vec<UcodeEntry>, usize, usize), VbiosError> {
+    let bit = find_bit_header(image)?;
+    let header_size = u8v(image, bit + 8).unwrap() as usize;
+    let token_size = u8v(image, bit + 9).unwrap() as usize;
+    let token_entries = u16v(image, bit + 10).unwrap_or(0) as usize;
+    if !(6..=8).contains(&token_size) {
+        return Err(VbiosError::NoFalconTable);
+    }
+    let expansion = find_expansion_offset(image)?;
+
+    for tok in 0..token_entries {
+        let t = bit + header_size + tok * token_size;
+        let token_id = u8v(image, t).unwrap_or(0);
+        let data_version = u8v(image, t + 1).unwrap_or(0);
+        if token_id != 0x70 || data_version != 2 {
+            continue;
+        }
+        // 6-byte token: DataSize u16 @2, DataPtr u16 @4; 8-byte: u32 @4.
+        let data_ptr = if token_size >= 8 {
+            u32v(image, t + 4).ok_or(VbiosError::Truncated)? as usize
+        } else {
+            u16v(image, t + 4).ok_or(VbiosError::Truncated)? as usize
+        };
+        let table_abs = expansion + u32v(image, data_ptr).ok_or(VbiosError::Truncated)? as usize;
+        // ucode table header (6B): ver, hdr_size, entry_size, count, desc_ver, desc_size
+        if u8v(image, table_abs).unwrap_or(0) != 1 {
+            continue;
+        }
+        let hdr_size = u8v(image, table_abs + 1).unwrap_or(0) as usize;
+        let entry_size = u8v(image, table_abs + 2).unwrap_or(0) as usize;
+        let count = u8v(image, table_abs + 3).unwrap_or(0) as usize;
+        if hdr_size < 6 || entry_size < 6 {
+            continue;
+        }
+        let mut entries = Vec::new();
+        for e in 0..count {
+            let at = table_abs + hdr_size + e * entry_size;
+            entries.push(UcodeEntry {
+                app_id: u8v(image, at).ok_or(VbiosError::Truncated)?,
+                target_id: u8v(image, at + 1).ok_or(VbiosError::Truncated)?,
+                desc_off: u32v(image, at + 2).ok_or(VbiosError::Truncated)?,
+            });
+        }
+        return Ok((entries, expansion, table_abs));
+    }
+    Err(VbiosError::NoFalconTable)
+}
+
+/// Descriptor V2 (60B, Turing) per FALCON_UCODE_DESC_V2.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DescV2 {
+    pub stored_size: u32,
+    pub uncompressed_size: u32,
+    pub virtual_entry: u32,
+    pub interface_offset: u32,
+    pub imem_phys_base: u32,
+    pub imem_load_size: u32,
+    pub imem_virt_base: u32,
+    pub imem_sec_base: u32,
+    pub imem_sec_size: u32,
+    pub dmem_offset: u32,
+    pub dmem_phys_base: u32,
+    pub dmem_load_size: u32,
+}
+
+/// Descriptor V3 (44B, GA10x+) per FALCON_UCODE_DESC_V3.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DescV3 {
+    pub stored_size: u32,
+    pub pkc_data_offset: u32,
+    pub interface_offset: u32,
+    pub imem_phys_base: u32,
+    pub imem_load_size: u32,
+    pub imem_virt_base: u32,
+    pub dmem_phys_base: u32,
+    pub dmem_load_size: u32,
+    pub engine_id_mask: u16,
+    pub ucode_id: u8,
+    pub signature_count: u8,
+    pub signature_versions: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Desc {
+    V2(DescV2),
+    V3(DescV3),
+}
+
+pub fn parse_desc(image: &[u8], expansion: usize, entry: &UcodeEntry) -> Result<Desc, VbiosError> {
+    let at = expansion + entry.desc_off as usize;
+    let vdesc = u32v(image, at).ok_or(VbiosError::Truncated)?;
+    let version = ((vdesc >> 8) & 0xFF) as u8;
+    let size = (vdesc >> 16) as u16 as usize;
+    let encrypted = vdesc & (1 << 2) != 0;
+    let _ = encrypted; // recorded, not enforced (kernel driver doesn't either)
+    match version {
+        2 if size >= 60 && at + 60 <= image.len() => {
+            let f = |i: usize| u32v(image, at + 4 + i * 4).unwrap_or(0);
+            Ok(Desc::V2(DescV2 {
+                stored_size: f(0),
+                uncompressed_size: f(1),
+                virtual_entry: f(2),
+                interface_offset: f(3),
+                imem_phys_base: f(4),
+                imem_load_size: f(5),
+                imem_virt_base: f(6),
+                imem_sec_base: f(7),
+                imem_sec_size: f(8),
+                dmem_offset: f(9),
+                dmem_phys_base: f(10),
+                dmem_load_size: f(11),
+            }))
+        }
+        3 if size >= 44 && at + 44 <= image.len() => Ok(Desc::V3(DescV3 {
+            stored_size: u32v(image, at + 4).unwrap_or(0),
+            pkc_data_offset: u32v(image, at + 8).unwrap_or(0),
+            interface_offset: u32v(image, at + 12).unwrap_or(0),
+            imem_phys_base: u32v(image, at + 16).unwrap_or(0),
+            imem_load_size: u32v(image, at + 20).unwrap_or(0),
+            imem_virt_base: u32v(image, at + 24).unwrap_or(0),
+            dmem_phys_base: u32v(image, at + 28).unwrap_or(0),
+            dmem_load_size: u32v(image, at + 32).unwrap_or(0),
+            engine_id_mask: u16v(image, at + 36).unwrap_or(0),
+            ucode_id: u8v(image, at + 38).unwrap_or(0),
+            signature_count: u8v(image, at + 39).unwrap_or(0),
+            signature_versions: u16v(image, at + 40).unwrap_or(0),
+        })),
+        v => Err(VbiosError::UnsupportedDescVersion(v)),
+    }
+}
+
+/// Find FWSEC descriptor (PROD or DBG). Returns (entry, desc).
+pub fn find_fwsec(image: &[u8], debug: bool) -> Result<(UcodeEntry, Desc), VbiosError> {
+    let (entries, expansion, _) = find_ucode_table(image)?;
+    let want = if debug { APP_ID_FWSEC_DBG } else { APP_ID_FWSEC_PROD };
+    for e in entries {
+        if e.app_id == want || e.app_id == APP_ID_FIRMWARE_SEC_LIC {
+            let desc = parse_desc(image, expansion, &e)?;
+            if e.app_id == want {
+                return Ok((e, desc));
+            }
+        }
+    }
+    Err(VbiosError::NoFwsecEntry { debug })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// TU106 1.rom regression anchor (skips when the NVOC checkout is
+    /// absent): FWSEC_PROD must be V2 with the measured geometry.
+    #[test]
+    fn tu106_rom_when_present() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../nvoc/1.rom");
+        let Ok(img) = std::fs::read(&p) else { return };
+        assert_eq!(u16v(&img, 0), Some(0xAA55));
+
+        let expansion = find_expansion_offset(&img).expect("expansion offset");
+        // Kernel semantics: 0xE0 image (0x20000) minus base length (0xea00).
+        assert_eq!(expansion, 0x11600, "TU106 adjust (NVOC measured 0x11600)");
+
+        let bit = find_bit_header(&img).expect("BIT header");
+        assert_eq!(bit, 0x1b0, "TU106 BIT header at 0x1b0");
+
+        let (entries, exp, table) = find_ucode_table(&img).expect("ucode table");
+        assert_eq!(exp, 0x20000);
+        assert_eq!(table, 0x11600 + 0xeb24, "ucode table abs offset");
+        assert_eq!(entries.len(), 16, "TU106 ucode entries");
+        assert!(entries.iter().any(|e| e.app_id == APP_ID_FWSEC_PROD));
+        assert!(entries.iter().any(|e| e.app_id == APP_ID_PRE_OS));
+
+        let (_, desc) = find_fwsec(&img, false).expect("FWSEC_PROD");
+        let Desc::V2(v2) = desc else { panic!("TU106 FWSEC must be V2") };
+        assert_eq!(v2.imem_load_size, 0x9600, "IMEMLoadSize (NVOC measured)");
+        assert_eq!(v2.imem_sec_base, 0x300, "IMEMSecBase");
+        assert_eq!(v2.imem_sec_size, 0x9300, "IMEMSecSize: 0x300+0x9300=0x9600");
+        assert_eq!(v2.dmem_load_size, 0x410, "DMEMLoadSize");
+        assert_eq!(v2.stored_size, 0x9a10, "stored = IMEM+DMEM");
+
+        let (_, dbg_desc) = find_fwsec(&img, true).expect("FWSEC_DBG");
+        assert_eq!(dbg_desc, desc, "TU106 debug track bit-identical geometry");
+    }
+
+    /// ASUS AD107M laptop VBIOS (user-provided dump, NVGI wrapper at 0x9400;
+    /// first-64KiB CRC 0xd4a7daa2 == the M1 NV_PROM sample from the card).
+    #[test]
+    fn ad107m_rom_when_present() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../nvoc/reverse/VBIOS/ASUS_4060_laptop_OC_95071640F7.rom");
+        let Ok(raw) = std::fs::read(&p) else { return };
+        let start = raw.windows(2).position(|w| w == [0x55, 0xaa]).expect("AA55");
+        let img = &raw[start..];
+
+        let expansion = find_expansion_offset(img).expect("expansion");
+        assert_eq!(expansion, 0x14e00, "AD107M adjust (0x24a00 - 0xfc00)");
+        let bit = find_bit_header(img).expect("BIT");
+        assert_eq!(bit, 0x1b0);
+        let (entries, _, table) = find_ucode_table(img).expect("ucode table");
+        assert_eq!(table, 0x14e00 + 0x8c74f);
+        assert_eq!(entries.len(), 16);
+        assert!(entries.iter().any(|e| e.app_id == APP_ID_FWSEC_PROD));
+
+        let (_, desc) = find_fwsec(img, false).expect("FWSEC_PROD");
+        let Desc::V3(v3) = desc else { panic!("AD107M FWSEC must be V3 (BOOT_FROM_HS)") };
+        assert_eq!(v3.stored_size, 0x10280);
+        assert_eq!(v3.imem_phys_base, 0xf500);
+        assert_eq!(v3.signature_count, 2, "two RSA3K slots; fuse version picks one");
+        assert_eq!(v3.signature_versions, 0x3, "slots 0 and 1 present");
+        // Debug track is a SEPARATE descriptor with the same geometry.
+        let (_, dbg_desc) = find_fwsec(img, true).expect("FWSEC_DBG");
+        assert_eq!(dbg_desc, desc, "AD107M debug track bit-identical geometry");
+    }
+}
