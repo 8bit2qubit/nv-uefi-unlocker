@@ -44,7 +44,12 @@ chain with zero unlock writes.
    to Windows after 30 s).
 3. Everything after that is automatic; the tool chains back into
    bootmgfw whether the transaction succeeds or fails. The full log lands
-   in `\loader.log` on the stick.
+   in `\loader.log` on the stick. The lookup order is fixed: **bootmgfw →
+   distro shim/grub/systemd-boot → the stick's generic
+   `\EFI\BOOT\BOOTX64.EFI`**. Only that last tier — which is normally this
+   very application — opens a 5-second window: any key returns to the
+   firmware shell (the unlock is already done and logged, and any OS can be
+   started from there).
 4. Re-run once per cold boot — the unlock is **volatile** (nothing
    persistent, no flashing, cleared by power loss).
 

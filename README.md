@@ -40,7 +40,10 @@ FP16 GEMM 29.89 → 49.33 TFLOPS（1.65×）。完整报告见
    混合模式下 EC 会在早期把 dGPU 置于 D3cold，BAR0 VBIOS aperture 不可见。
 2. U 盘启动 → 版本屏 → **空格确认**（30 秒无操作自动回 Windows）。
 3. 之后全自动：事务完成或失败都会自动链回 bootmgfw 进 Windows，全程日志
-   落 U 盘 `\loader.log`。
+   落 U 盘 `\loader.log`。引导器查找顺序固定为 **bootmgfw → 各发行版
+   shim/grub/systemd-boot → U 盘 `\EFI\BOOT\BOOTX64.EFI`**；只有走到最后
+   这一档（即本工具自己所在的通用路径）才给 5 秒窗口，按任意键回固件
+   shell（此时解锁已完成、日志已落盘，可从 shell 手动启动任何系统）。
 4. 每次冷启动重放一次（解锁易失，无持久化、无刷写、断电即清）。
 
 V67 payload 与全部资产再生成：`cargo run -p assets -- generate-ad102` /
