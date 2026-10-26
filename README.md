@@ -202,7 +202,7 @@ EIO 中止 ~~（issue #1，4050 LP 28E1 / AMD 台式机，已由用户关闭 BIO
 
 **机理**：booter 阶段是全链**第一个主机侧 DMA** 消费者（之前的 scrubber/
 FWSEC 全是 portal 拷贝与 PROM 读取）。loader 交给 booter 的是裸物理地址，
-依赖 boot services 阶段的恒等映射；部分~~ AMD ~~台式主板的固件 ~~ IOMMU（AMD-Vi）
+依赖 boot services 阶段的恒等映射；部分 ~~AMD台式主板的固件 IOMMU（AMD-Vi）
 在该阶段做地址翻译~~，不使能设备 DMA 能力，GPU没法从内存读payload，读到垃圾，描述符校验即失败。
 
 **处置**：~~进 BIOS 关闭 **IOMMU（AMD-Vi）**，重跑回放模式（预期
