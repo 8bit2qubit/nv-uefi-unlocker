@@ -59,26 +59,15 @@ fn main() -> Status {
     // Phase: TX (feature-gated transaction; only in explicit tx builds).
     // NOTE: inside tx_phase the console drivers are detached (TOTORONG
     // craft) - the screen goes dark from that point until Windows boots.
-    // The log file keeps recording; the CHAIN-GATE pause still works
-    // (keyboard events are handled by the firmware, not the console).
+    // The log file keeps recording and is the evidence record.
     #[cfg(feature = "tx")]
     if let Some(gpu_handle) = &gpu {
         tx_phase(gpu_handle.handle);
     }
 
-    // Phase: CHAIN-GATE. tx builds pause before leaving the app so the
-    // final screen (SELECTOR RESULT / POST-FLR / dump lines) can be read
-    // or photographed before the console is torn down by bootmgfw.
-    #[cfg(feature = "tx")]
-    {
-        info!("CHAIN-GATE: press ANY KEY to chain-load bootmgfw (photo the screen first if needed)");
-        match keywait::wait_any_key_or_timeout(300) {
-            keywait::KeyOrTimeout::Key(k) => info!("CHAIN-GATE: key {:?} - chaining", k),
-            keywait::KeyOrTimeout::Timeout => info!("CHAIN-GATE: 300s timeout - chaining anyway"),
-        }
-    }
-
     // Phase: CHAIN. Read-only LoadImage/StartImage of the ESP bootmgfw.efi.
+    // The verdict lines above are in \loader.log; no pause before handing
+    // off (the log file is the evidence record, not the screen).
     match chainload::chain_load_bootmgfw() {
         Ok(()) => info!("CHAIN: bootmgfw returned unexpectedly"),
         Err(e) => info!("CHAIN: failed: {:?}", e.status()),
