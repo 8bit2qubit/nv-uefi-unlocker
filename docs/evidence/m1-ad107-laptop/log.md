@@ -380,3 +380,28 @@ Integrity self-tests green (pattern_clean 0 errors; injection_capture
 exact). 1000 s stability run recommended as the full battery.
 
 M4 ACCEPTANCE COMPLETE (firmware verdicts + Windows workload).
+
+## Run: 28a1 silicon (RTX 4050 Laptop, EFI v0.1.1) 2026-10-26 — layout EIO
+
+Same G614JV, card swapped to the 4050 (10de:28a1), machine left in hybrid
+mode (iGPU primary, 2 GOP handles). Boot + chainload verified; the TX
+itself died in layout with EIO, NOT a poison that poisons the whole card:
+
+  SAMPLE VGA_WORKSPACE 0x625f04 = 0xbadf1301 [BADF_VARIANT]
+  SAMPLE SEC2_CPUCTL 0x840100 = 0xbadf5620  (same bucket as 28e0)
+  scrubber ok; GFW "stuck" accepted; layout -> EIO; FLR; clean chain.
+
+ROOT CAUSE: layout_from_registers used strict read32(), which turns ANY
+0xbadf_xxxx into EIO. VGA_WORKSPACE is the one layout input where poison
+is tolerable - only bit3 feeds the decision and bit3=0 routes to the same
+"reserve FB top 1 MiB" path the healthy 28e0 took (there the register
+reads 0x1). A gated VGA workspace is the expected state when the dGPU is
+not the primary display device: its devinit never wrote the pointer.
+
+FIX (next build): five raw reads with the raw values logged, poison
+rejected strictly for FB/MMU PLM/lock, tolerated (with fallback + MUX
+hint) only for VGA. 0xbadf1301 recorded as a new 0x13xx bucket.
+
+Expectation for the next run: layout passes; open risk is the GSP domain
+(CPUCTL/HWCFG2/FBIF read-backs) and whether FWSEC ignition survives
+without the dGPU ever being display owner.

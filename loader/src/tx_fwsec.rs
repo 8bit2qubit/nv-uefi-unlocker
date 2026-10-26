@@ -8,7 +8,7 @@ use log::info;
 use uefi::boot;
 
 use crate::pci::PciIo;
-use crate::tx::{hs_prevalidate, TxError, TxGpu};
+use crate::tx::{hs_prevalidate, inaccessible, TxError, TxGpu};
 
 /// Extracted FWSEC from the card's own PROM (V3 descriptor semantics).
 pub struct FwsecInfo {
@@ -296,11 +296,37 @@ pub fn layout_from_registers(
     image_size: u64,
     boot_size: u64,
 ) -> Result<LayoutOut, TxError> {
-    let fb_mib = gpu.read32(0x0011_83a4)?;
-    let vga = gpu.read32(0x0062_5f04)?;
-    let plm = gpu.read32(0x001f_a7c8)?;
-    let lo = gpu.read32(0x001f_a82c)?;
-    let hi = gpu.read32(0x001f_a830)?;
+    let fb_raw = gpu.read32_raw(0x0011_83a4);
+    let vga_raw = gpu.read32_raw(0x0062_5f04);
+    let plm_raw = gpu.read32_raw(0x001f_a7c8);
+    let lo_raw = gpu.read32_raw(0x001f_a82c);
+    let hi_raw = gpu.read32_raw(0x001f_a830);
+    // Log the cold board inputs even when the layout is rejected - the state
+    // cannot be reconstructed once the NVIDIA driver has bound.
+    info!(
+        "layout inputs: fb_mib={fb_raw:#010x} vga={vga_raw:#010x} mmu_plm={plm_raw:#010x} mmu_lo={lo_raw:#010x} mmu_hi={hi_raw:#010x} image={image_size:#x} boot={boot_size:#x}"
+    );
+    if inaccessible(fb_raw) || inaccessible(plm_raw) || inaccessible(lo_raw) || inaccessible(hi_raw)
+    {
+        return Err(TxError::EIO);
+    }
+    let fb_mib = fb_raw;
+    // The VGA workspace pointer is the one layout input a poison value is
+    // tolerable for: only bit3 decides, and bit3=0 (also the value on a
+    // healthy card) means "no workspace pointer, reserve the FB top 1 MiB".
+    // A BADF here is the hybrid/Optimus signature - the dGPU is not the
+    // primary display device, whose devinit would have written it.
+    let vga = if inaccessible(vga_raw) {
+        info!(
+            "layout: VGA workspace poison ({vga_raw:#010x}) - using PRAMIN-top fallback; on a laptop switch the MUX to dGPU-only and re-run"
+        );
+        0
+    } else {
+        vga_raw
+    };
+    let plm = plm_raw;
+    let lo = lo_raw;
+    let hi = hi_raw;
     if fb_mib == 0 || fb_mib == !0u32 || plm & 1 == 0 {
         return Err(TxError::ENodev);
     }

@@ -78,6 +78,14 @@ impl TxGpu<'_> {
         Ok(v)
     }
 
+    /// Raw BAR0 read: the poison word is returned, not turned into an error.
+    /// For registers where a BADF value is tolerable and the caller has to
+    /// classify it (layout's VGA workspace: only bit3 matters, upstream only
+    /// rejects ~0 there).
+    pub fn read32_raw(&self, off: u32) -> u32 {
+        self.pci.bar_read_u32(self.bar, off as u64)
+    }
+
     /// THE write path of the whole project — exists only in `tx` builds.
     pub fn write32(&self, off: u32, v: u32) {
         self.pci.bar_write_u32(self.bar, off as u64, v);

@@ -66,6 +66,22 @@ FEAT 簇 13/13 可读（存在性=是，PL0 可读）✓。
 计为 ok——教训：迭代语义与读取宽度要对齐建模）；0xbadf5620 无桶（加 BADF_VARIANT
 兜底桶 + 读错误独立计数）。
 
+## AD107M 第二张卡（RTX 4050 Laptop，10de:28a1）——首次实机（2026-10-26，混合输出模式）
+
+同一 G614JV，卡换成 4050；整机处于 **iGPU 主显（Optimus，2 个 GOP 句柄）**状态。事务在
+layout 读数处失败（VGA 毒值把整条 layout 拒掉），FLR+链回 bootmgfw 正常。
+
+| 寄存器 | 值 | 解读 |
+|---|---|---|
+| FB_SIZE_MIB | 可读（6GB 量级） | 显存已训练，不是 D3cold |
+| **VGA_WORKSPACE 0x625f04** | **0xbadf1301** | **新毒值（0x13xx 桶）**——dGPU 非主显，devinit 没给它写 workspace 指针。只有 bit3 参与布局判决，bit3=0 → 与健康卡（该寄存器 0x1）走同一条"FB 顶 1MiB 保留"路径 |
+| SEC2_CPUCTL 0x840100 | 0xbadf5620 | 与 28e0 相同的冷态域门控（复位后可读，scrubber 通过） |
+| GOP 句柄数 | **2** | 混合输出判据；健康 28e0 实测为 1 |
+
+**修复**：`layout_from_registers` 的五个输入改 raw 读，FB/MMU 锁仍严格拒毒，
+仅 VGA workspace 容毒并回退（log 打出原值与 MUX 提示）。教训沿用 §3.3：毒值先分桶再
+决定"可用/不可用"，全 BADF 一刀切成错误会丢掉可用信息。
+
 ## 已知对照值（社区来源，供采样比对）
 
 | 寄存器 | GA100/GA102 锁定冷值 | 来源 |
