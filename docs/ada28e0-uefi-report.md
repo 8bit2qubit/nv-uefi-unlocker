@@ -102,6 +102,23 @@ DMA 装载（IMEMC/DMEMC 字节地址直写），这也是 Turing 内核装载 B
   同一会话绝不重试。
 - 热重启后的存活情况未测（社区同样未测）。
 
+### U 盘根目录与期望哈希（`make-usbroot.ps1` 再生产物，2026-10-26 实测与
+解锁用 U 盘逐字节一致）
+
+| 文件 | SHA-256 |
+| --- | --- |
+| `BOOTX64.EFI` | `dd1ed81b5357a6983e10f9e71f55380405201b7b9c9ee8bf67d55c473c0992df` |
+| `booter_load_ad102.bin` | `6ee05b20e1dc244c08c052f36ef28469b8d09f4955d1fe33e48a179e11a7fd49` |
+| `gsp_boot_desc_ad102.bin` | `83f8f3f1f5f9496e0ea8fc7103c2beb64d0b6de2f5ffe725f13514de5a95fa42` |
+| `gsp_boot_ad102.bin` | `45d6335a8185d6ff13e8d1484cea73f68d3d13aa1c19dc080ed1c3482dd5bac0` |
+| `fwimage_ad102.bin` | `004394a6b5a217ef2445631f1e59fbca448d3d8aaa07e001898bf7569b98eec4` |
+| `fwsignature_ad102.bin` | `394612a0279ef8f8b457f91bfa35860e086d195d079975efa07b9f0938e019e7` |
+| `scrubber_ad10x.bin` | `1cfc78136a4dff4993b7e5a1a09345f6a67d0762555e5bd9660e406831379348` |
+| `v67-ad102-four-plm.bin` | `44c36b2d6b3424e53e18f3e55db85c833655de071ce66ce42749588a4a7dc8cb` |
+
+再生是确定性的（输入钉 hash + 抽取/生成硬校验），任何人在任何机器上跑
+`make-usbroot.ps1` 都应得到逐字节相同的产物；不符即停（脚本自动拒绝）。
+
 ## 安全边界
 
 本仓库遵循与上游相同的纪律：NVIDIA 固件 blob、密钥、解密产物、生成的
