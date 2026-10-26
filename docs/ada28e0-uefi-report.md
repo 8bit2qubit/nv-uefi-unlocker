@@ -36,6 +36,13 @@ payload 留给后续原厂引导）；全流程干净交棒 Windows。
 ASUS 移动端）。本报告将其补上。解锁为易失性质：每次冷启动经 U 盘重放一次，
 无持久化、无刷写、断电即清。
 
+**与 nvoc kmd 组合**：本工具（UEFI 侧，解除 tensor 发射速率钳制）与
+[Skyworks-Neo/nvoc](https://github.com/Skyworks-Neo/nvoc) 的 kmd 功耗墙解锁
+（OS 侧，解除功耗/电压墙）正交可叠加。组合实测：FP16 GEMM 8192 达
+60–63 TFLOPS、芯片功耗 ~163.7 W、Hot Spot 104.4 °C、PerCap Reason=Pwr
+持续——远超原厂 TGP 包络，散热与供电自担，物理损坏概不负责（见 README
+警告）。
+
 ## 与 Linux kmod 路径的差异（为什么这条链不同）
 
 gpu-unlock / gpu-unlock-ada 的 Linux 方案在 initramfs kmod 中执行，SEC2 的
