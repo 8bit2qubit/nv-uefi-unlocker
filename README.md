@@ -84,8 +84,11 @@ V67 payload 与全部资产再生成：`cargo run -p assets -- generate-ad102` /
 
 本工具与本人主导开发的 **[Skyworks-Neo/nvoc](https://github.com/Skyworks-Neo/nvoc)** 的 kmd
 功耗墙解锁**兼容且正交**：本工具在 UEFI 预驱动窗口解除 tensor 发射速率钳制
-（FEAT/WPR/WPRCFG PLM），nvoc kmd 在操作系统内解除功耗/电压墙——两者作用于
-不同层级，可叠加，推荐配合使用以获得极限性能。
+（FEAT/WPR/WPRCFG PLM），nvoc kmd 在操作系统内解除功耗墙，nvoc set-volt-rail-limit 解除 slot 0,1,2 的Target Wall，Vbios Wall，VRM Max Wall(Vop) ——两者作用于
+不同层级（驱动“下面”+驱动“上面”），可叠加，推荐配合使用以获得极限性能。
+
+<img width="1280" height="595" alt="image" src="https://github.com/user-attachments/assets/1f60b619-b367-4823-9764-1caa44575501" />
+
 
 ### 组合实测极限（RTX 4060 Laptop 28e0，FP16 GEMM + nvoc）
 
@@ -109,7 +112,9 @@ Laptop 的物理极限区间**，再往上任何优化都只能来自降温。
 
 ### 解锁的本质：被禁用的晶体管恢复工作，而非超频
 
-被钳制的 SM 发射率是**物理关闭的tensor数据通路**（manufacturing
+额外的算力不可能是白嫖得到的，仍然遵循硅芯片电气、热力学等物理定律！
+
+被钳制的 SM 发射率是**被NVIDIA刻意软件层面用efuse在固件中物理关闭的tensor数据通路**（manufacturing
 segmentation），不是降频或限功率——频率、电压、功耗墙都与它无关。对照
 实验（RTX 4060 Laptop，ASUS ROG Strix G16 **G614JV**，FP16 tensor，
 同卡同精度唯二变量为发射率与功率墙）：
@@ -141,6 +146,8 @@ segmentation），不是降频或限功率——频率、电压、功耗墙都�
 >
 > **因超功耗、超压、超温导致的芯片、供电或整机物理损坏，本项目概不负责**
 > ——解锁是易失的，但烧坏的硅片不会恢复。
+> <img width="287" height="520" alt="image" src="https://github.com/user-attachments/assets/d5e5fb50-4504-4b76-ba43-56e5db078b8b" />
+
 
 ## 工作原理速览
 
