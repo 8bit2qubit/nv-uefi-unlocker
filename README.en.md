@@ -74,6 +74,28 @@ Interpretation: at full load the card first hits the power wall (Pwr); with
 the wall lifted it hits the thermal wall (Thrm) — **3045 MHz / 206.8 W /
 ~104 °C Hot Spot is the physical limit band of this 8 GB 4060 Laptop**.
 
+### What the unlock actually is: disabled transistors back to work, not overclocking
+
+The clamped SM issue rate is a **physically disabled tensor datapath**
+(manufacturing segmentation) — unrelated to clocks, voltage or power walls.
+Controlled experiment (RTX 4060 Laptop, ASUS ROG Strix G16 **G614JV**,
+FP16 tensor, same card and precision, the only variables being the issue
+rate and the power wall):
+
+| State | Clock | Chip power | Wall hit | FP16 tensor |
+| --- | --- | --- | --- | --- |
+| stock (power wall lifted) | **3.0 GHz** | 155–160 W | **no power wall hit** | 35.9 TFLOPS |
+| SM issue-rate unlocked (+nvoc) | avg **2.89 GHz** | 190–208 W | thermal + power-delivery limit | **64.30 TFLOPS** |
+
+After the unlock the frequency **drops 3.7%** and power rises 34%, yet
+throughput rises **79%** — the extra FLOPs cannot come from clocks or
+power; they come from **the full transistor set no longer idling**: with
+the segmentation mask lifted, the number of tensor cores participating in
+issue per clock edge returns to the full design set. This is why
+overclocking/over-power alone can never close the gap (stock at 3.0 GHz
+hitting no wall only reaches 35.9 T) while the unlock more than doubles
+throughput at a *lower* clock.
+
 > **⚠️ Hardware risk warning**
 > Stacking both unlocks pushes power and heat density **far outside the
 > factory envelope** (measured: 200+ W board power, Hot Spot around
