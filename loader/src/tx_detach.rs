@@ -30,6 +30,47 @@ fn config_snapshot(pci: &PciIo) -> alloc::vec::Vec<u32> {
     c
 }
 
+/// Entry power state, read before anything else touches the device.
+pub struct PmEntry {
+    pub cap: Option<u8>,
+    /// PMCSR as found (before the D0 request).
+    pub pmcsr: u16,
+    /// Entry was NOT D0 - a sleep/resume or fast-startup handoff, not a POST.
+    pub warm: bool,
+}
+
+/// Resume-entry preflight. A sleep/resume hands the dGPU over in D3hot: the
+/// firmware did not POST it, the previous OS session's device context is
+/// still in the function, and everything the transaction relies on (BAR
+/// decode, claim guards, FLR) is only defined in D0. Read PMCSR first, say
+/// so loudly, then bring the function to D0 with a verified readback.
+/// `\tx-require-d0.txt` on the boot volume turns the warning into an abort
+/// (nothing has been written yet at that point, so the run is a no-op).
+pub fn pm_preflight(pci: &PciIo) -> Result<PmEntry, &'static str> {
+    let Some(cap) = pci.pm_cap() else {
+        info!("PM: no power-management capability - D-state not evaluable");
+        return Ok(PmEntry { cap: None, pmcsr: 0, warm: false });
+    };
+    let before = pci.pmcsr(cap);
+    let warm = before & 0x3 != 0;
+    info!("PM: entry PMCSR={before:#06x} state=D{} (cap@{cap:#04x})", before & 0x3);
+    if warm {
+        info!("PM: WARM ENTRY (resume/fast-startup handoff, not a POST): the previous session's device context is still in this function; the unlock may not survive the Windows handoff");
+        if crate::tx::read_boot_file("\\tx-require-d0.txt").is_some() {
+            info!("PM: \\tx-require-d0.txt present - aborting before any GPU write (use Restart, or cold boot, and re-run)");
+            return Err("warm entry with require-D0 switch set");
+        }
+    }
+    let after_cur = pci.pmcsr(cap);
+    if !pci.pmcsr_force_d0(cap) {
+        let rb = pci.pmcsr(cap);
+        info!("PM: D0 request did NOT stick (PMCSR {after_cur:#06x} -> {rb:#06x}, state=D{})", rb & 0x3);
+        return Err("device refuses D0");
+    }
+    info!("PM: D0 verified (PMCSR={:#06x})", pci.pmcsr(cap));
+    Ok(PmEntry { cap: Some(cap), pmcsr: before, warm })
+}
+
 /// Staged detach + exclusive claim. Returns the config-space baseline taken
 /// while exclusively owned (drift reference for the post-transaction check).
 pub fn detach_and_claim(pci_handle: Handle) -> Result<alloc::vec::Vec<u32>, &'static str> {

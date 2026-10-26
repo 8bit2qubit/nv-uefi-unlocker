@@ -33,6 +33,8 @@ pub mod regs {
     pub const FEAT_PLM: u32 = 0x0082_3804;
     pub const FEAT_SS0: u32 = 0x0082_381c;
     pub const FEAT_SS1: u32 = 0x0082_3820;
+    /// Effective-speed readout (nine 3-bit fields; all 0 = full rate).
+    pub const FEAT_READOUT_1: u32 = 0x0082_3818;
     // Ada four-write chain
     pub const WPR_PLM: u32 = 0x001f_a7c4;
     pub const WPRCFG_PLM: u32 = 0x001f_a7cc;
@@ -57,6 +59,8 @@ pub enum TxError {
     ERange,
     EBusy,
     EAlready,
+    /// Warm (non-D0) entry: aborted before any GPU write, nothing to undo.
+    EWarm,
 }
 
 pub fn inaccessible(value: u32) -> bool {
@@ -805,6 +809,15 @@ pub struct TxAssets {
 pub fn run_transaction(gpu: &TxGpu, assets: &TxAssets, pci_handle: uefi::Handle) -> Result<(), TxError> {
     info!("TX: BEGIN (phases: detach claim pre-flr scrub gfw layout fwsec booter verify selectors restore flr)");
 
+    // Resume-entry preflight FIRST, before anything is detached or written:
+    // a non-D0 entry means the firmware did not POST this card (sleep/resume
+    // or fast-startup handoff), which changes what the Windows driver will
+    // do with the state we leave behind.
+    crate::tx_detach::pm_preflight(gpu.pci).map_err(|e| {
+        info!("TX: PM preflight: {e}");
+        TxError::EWarm
+    })?;
+
     // TOTORONG craft: all console + vendor drivers off the device, PciIo
     // exclusively claimed, IO|MEM|BME enabled, config baseline captured.
     // (Black screen starts here by design; the log file keeps recording.)
@@ -948,10 +961,32 @@ pub fn run_transaction(gpu: &TxGpu, assets: &TxAssets, pci_handle: uefi::Handle)
     Ok(())
 }
 
+/// Save PMCSR and pin the function to D0 before an FLR (PCIe: FLR is only
+/// defined in D0; Linux's pci_reset_function also forces D0 first).
+pub fn pm_flr_pre(pci: &crate::pci::PciIo) -> Option<(u8, u16)> {
+    let cap = pci.pm_cap()?;
+    let saved = pci.pmcsr(cap);
+    if saved & 0x3 != 0 {
+        info!("PM: pre-FLR state was D{} (PMCSR={saved:#06x}) - forcing D0 for the reset", saved & 0x3);
+        let _ = pci.pmcsr_force_d0(cap);
+    }
+    Some((cap, saved))
+}
+
+/// Restore the pre-FLR PMCSR with the state field pinned to D0 and verify.
+pub fn pm_flr_post(pci: &crate::pci::PciIo, saved: Option<(u8, u16)>) {
+    let Some((cap, pmcsr)) = saved else { return };
+    pci.pmcsr_write(cap, pmcsr & !0x3);
+    stall(Duration::from_millis(10));
+    let rb = pci.pmcsr(cap);
+    info!("PM: post-FLR PMCSR={rb:#06x} state=D{} (entry {pmcsr:#06x})", rb & 0x3);
+}
+
 /// One Function-Level Reset with spec timing and command restore.
 /// Per reference post-FLR expectations: PCI identity intact, GFW completion
 /// persists, WPR2 cleared, engines halted - the "cold-boot-equivalent" state.
 pub fn flr_once(pci: &crate::pci::PciIo) {
+    let pm = pm_flr_pre(pci);
     // pci_save_state analog: command + BAR0-5 config dwords (0x04..0x28).
     // PCIe FLR resets these to defaults - WITHOUT restore, the device no
     // longer decodes its BARs and every memory read master-aborts to 0xff
@@ -999,6 +1034,32 @@ pub fn flr_once(pci: &crate::pci::PciIo) {
     info!(
         "FLR: cmd={cmd:#06x} devsta={sta:#06x} (pending={}) gfw_boot={gfw:#x} wpr2_hi={wpr_hi:#x}",
         sta & 0x200 != 0,
+    );
+    pm_flr_post(pci, pm);
+}
+
+/// Last observable state before the chain-load, in one line. Everything the
+/// Windows side will later read back is logged here so the two records can be
+/// compared directly (a mismatch after boot localizes the consumer that undid
+/// the writes - driver reinit, rail cut, or nothing at all).
+pub fn handoff_out(pci: &crate::pci::PciIo) {
+    let rd = |off: u32| pci.bar_read_u32(0, off as u64);
+    let (ss0, ss1) = (rd(regs::FEAT_SS0), rd(regs::FEAT_SS1));
+    let readout = rd(regs::FEAT_READOUT_1);
+    let plm = rd(regs::FEAT_PLM);
+    let wpr_hi = rd(regs::WPR2_HI);
+    let (pmcsr, dstate) = match pci.pm_cap() {
+        Some(cap) => {
+            let v = pci.pmcsr(cap);
+            (v, v & 0x3)
+        }
+        None => (0u16, 0xffu16),
+    };
+    info!(
+        "HANDOFF-OUT: ss0={ss0:#010x} ss1={ss1:#x} readout1={readout:#010x} feat_plm={plm:#010x} wpr2_hi={wpr_hi:#x} pmcsr={pmcsr:#06x} dstate=D{dstate} | ss0_unlock={} ss1_unlock={} plm_open={}",
+        ss0 == crate::tx_booter::SS0_UNLOCK,
+        ss1 == crate::tx_booter::SS1_UNLOCK,
+        plm == 0xffff_ffff,
     );
 }
 

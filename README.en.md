@@ -63,12 +63,16 @@ Regenerate the payload and all assets:
 | --- | --- | --- |
 | hybrid mode, iGPU-only shutdown | cold: no GOP, BAR0 all `0xffffffff` | ❌ claim preflight reports "dGPU powered off (D3cold)" |
 | hybrid mode, hybrid shutdown -> restart | hot: GOP present, registers readable | ✅ works end to end (four writes + selectors surviving FLR - the success log in evidence) |
-| hybrid mode, after sleep/wake | parked in D3, domains gated (VGA_WORKSPACE reads `0xbadf1301`) | ❌ like above |
+| hybrid mode, after sleep/wake, D3-gated | parked in D3, domains gated (VGA_WORKSPACE reads `0xbadf1301`) | ❌ claim preflight rejects it |
+| hybrid mode, after sleep/wake, transaction runs | registers readable, whole chain can go green - but the card is warm | ⚠️ green chain is not a live unlock: it can be undone after handoff; read `HANDOFF-OUT` and probe from Windows (`docs/warm-resume-entry.md`) |
 | dGPU-only, after sleep or restart | always panel owner, always powered | ✅ works in both |
 
 Operational rule: reboot from Windows with **Restart** (or cold-boot straight
 into the stick from the boot menu). Do not use the iGPU-only shutdown path and
-do not enter the stick right after a sleep/wake cycle.
+do not enter the stick right after a sleep/wake cycle. The PM preflight logs
+`PM: WARM ENTRY` and pulls a non-D0 entry back to D0 (verified by readback);
+drop an empty `\tx-require-d0.txt` on the stick to turn that into a zero-write
+abort instead.
 
 **Why (it is not the mode being better; it is whom the firmware POSTs for)**
 

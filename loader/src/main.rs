@@ -153,18 +153,31 @@ fn tx_phase(handle: uefi::Handle) {
     }
     let assets = tx::TxAssets { family, booter, boot_desc, gsp_boot, gsp_image, stock_sig, v67 };
     match tx::run_transaction(&gpu, &assets, handle) {
-        Ok(()) => info!("SELECTOR RESULT: transaction complete"),
+        Ok(()) => {
+            info!("SELECTOR RESULT: transaction complete");
+            tx::handoff_out(&pci);
+        }
         // Already-open PLM = already unlocked or not cold: skip (success
         // class, gpu-unlock-ada da96e3f), definitely no FLR - it would wipe
         // a live unlock.
         Err(tx::TxError::EAlready) => {
             info!("TX: already unlocked / not cold (EALREADY) - skipped, nothing to unwind");
+            tx::handoff_out(&pci);
+        }
+        // Warm entry with the require-D0 switch: nothing was written, the
+        // card was not even reset - the clean "come back after a Restart"
+        // outcome. No emergency FLR (FLR from a non-D0 state is exactly the
+        // undefined case).
+        Err(tx::TxError::EWarm) => {
+            info!("TX: aborted on warm/resume entry before any GPU write - chain-loading unchanged Windows (use a Restart or cold boot)");
+            tx::handoff_out(&pci);
         }
         Err(e) => {
             info!("TX: transaction failed: {e:?} - NOT retrying this session");
             // Failure unwind: FLR wipes our half-states (engine resets, BCR,
             // DMA queues) so the Windows driver gets a cold-boot card.
             tx::emergency_flr(handle);
+            tx::handoff_out(&pci);
         }
     }
 }

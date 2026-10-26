@@ -8,6 +8,8 @@
 //! There is deliberately no write helper in this file.
 
 use core::ffi::c_void;
+#[cfg(feature = "tx")]
+use core::time::Duration;
 use log::info;
 use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams, SearchType};
 use uefi::proto::unsafe_protocol;
@@ -212,7 +214,53 @@ impl PciIo {
         // Safety: exclusively borrowed protocol.
         unsafe {
             let _ = (self.0.pci.write)(&self.0 as *const _ as *mut _, PciWidth::Uint16, offset, 1, &v as *const _ as *mut c_void);
-        };
+        }
+    }
+
+    /// Walk the legacy capability list for the Power Management capability
+    /// (ID 0x01). Read-only. `None` = no PM cap, which means the D-state
+    /// cannot be evaluated at all (the device is then assumed powered on).
+    #[cfg(feature = "tx")]
+    pub fn pm_cap(&self) -> Option<u8> {
+        if self.config_read_u16(0x06) & 0x10 == 0 {
+            return None; // STATUS.CAP_LIST absent
+        }
+        let mut ptr = self.config_read_u8(0x34) & 0xfc;
+        let mut guard = 0;
+        while ptr != 0 && guard < 48 {
+            if self.config_read_u8(ptr.into()) == 0x01 {
+                return Some(ptr);
+            }
+            ptr = self.config_read_u8(ptr as u32 + 1) & 0xfc;
+            guard += 1;
+        }
+        None
+    }
+
+    /// PMCSR read (PM capability + 4). Bits 1:0 = PowerState.
+    #[cfg(feature = "tx")]
+    pub fn pmcsr(&self, cap: u8) -> u16 {
+        self.config_read_u16(cap as u32 + 4)
+    }
+
+    /// PMCSR write, caller supplies the exact value.
+    #[cfg(feature = "tx")]
+    pub fn pmcsr_write(&self, cap: u8, v: u16) {
+        self.cfg_write_u16(cap as u32 + 4, v);
+    }
+
+    /// Request D0 by clearing PMCSR.PowerState (all other bits preserved)
+    /// and verify by readback. True only when the state field reads back 0.
+    /// A D3hot -> D0 transition may take up to 10 ms (PCI PM spec).
+    #[cfg(feature = "tx")]
+    pub fn pmcsr_force_d0(&self, cap: u8) -> bool {
+        let cur = self.pmcsr(cap);
+        if cur & 0x3 == 0 {
+            return true;
+        }
+        self.pmcsr_write(cap, cur & !0x3);
+        boot::stall(Duration::from_millis(20));
+        self.pmcsr(cap) & 0x3 == 0
     }
 
     /// Coherent common-buffer DMA allocation (AllocateBuffer + Map).

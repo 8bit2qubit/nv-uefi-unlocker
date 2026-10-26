@@ -28,6 +28,7 @@ FP16 GEMM 29.89 → 49.33 TFLOPS（1.65×）。完整报告见
 | `fwsignature_ad102.bin` | GSP-RM stock 签名（WprMeta 引用） | ✅ |
 | `scrubber_ad10x.bin` | 内核同款 SEC2 scrubber（BSI handoff 1→3） | ✅ |
 | `v67-ad102-four-plm.bin` | **V67 四写 payload——放上即解锁模式** | 可选 |
+| `tx-require-d0.txt` | 入口非 D0（休眠恢复）时直接 abort、零写入 | 可选 |
 | `\loader.log` | （运行产物）全部阶段日志，evidence record | 输出 |
 
 不放 `v67-*.bin` 即为**回放/诊断模式**：走完全链但零解锁写入（刷存在感
@@ -56,11 +57,14 @@ V67 payload 与全部资产再生成：`cargo run -p assets -- generate-ad102` /
 | --- | --- | --- |
 | 混合模式 · 纯 iGPU 关机 | 冷：无 GOP，BAR0 全 `0xffffffff` | ❌ claim 前置即报 "dGPU powered off (D3cold)" |
 | 混合模式 · 混合关机 → 重启 | 热：有 GOP，寄存器可读 | ✅ 全链跑通（四写 + 选择器穿 FLR，即 evidence 里的成功日志） |
-| 混合模式 · 休眠/唤醒之后 | 停在 D3、域门控（VGA_WORKSPACE 读回 `0xbadf1301`） | ❌ 同上 |
+| 混合模式 · 休眠/唤醒之后 · D3 门控态 | 停在 D3、域门控（VGA_WORKSPACE 读回 `0xbadf1301`） | ❌ claim 前置即报 |
+| 混合模式 · 休眠/唤醒之后 · 事务可跑 | 寄存器可读、全链能绿，但卡是热的 | ⚠️ 事务绿 ≠ 解锁有效：出口后可能被作废，先看 `HANDOFF-OUT` 并做 Windows 侧读回（`docs/warm-resume-entry.md`） |
 | 独显直连 · 休眠或重启 | 始终是 panel owner、始终有电 | ✅ 均可用 |
 
 操作建议：**从 Windows 选"重启"**（或冷启后直接从启动菜单进 U 盘）再运行；不要用
-"关机再开"的 iGPU-only 路径，也不要在休眠唤醒后直接进 U 盘。
+"关机再开"的 iGPU-only 路径，也不要在休眠唤醒后直接进 U 盘。已实现 PM 预检：入口
+非 D0 会打 `PM: WARM ENTRY` 并把卡拉回 D0（读回确认），要更严格就在 U 盘根目录放
+空文件 `\tx-require-d0.txt`——此时 warm 入口直接 abort、零写入零复位。
 
 **原因分析（不是模式好坏，而是固件为谁无条件跑 POST）**
 
