@@ -43,6 +43,21 @@ const END_ENTIRE: [u8; 4] = [0x7f, 0xff, 0x04, 0x00];
 
 pub fn chain_load_bootmgfw() -> Result<()> {
     info!("PHASE: CHAIN");
+    // The shell's `map -r` equivalent: before enumerating filesystems,
+    // recursively reconnect every handle so block devices carry freshly
+    // bound FAT/SFS instances (ours may have been torn down or left in an
+    // intermediate state by the detach/reconnect storm during the
+    // transaction; a fresh UEFI shell re-binds and sees everything).
+    match boot::locate_handle_buffer(SearchType::ByProtocol(&crate::pci::PciIo::GUID)) {
+        Ok(handles) => {
+            for h in handles.iter() {
+                let _ = boot::connect_controller(*h, &[], None, true);
+            }
+            // Let binding callbacks settle before the SFS enumeration.
+            boot::stall(core::time::Duration::from_millis(300));
+        }
+        Err(_) => {}
+    }
     let fs_handles = boot::locate_handle_buffer(SearchType::ByProtocol(&SimpleFileSystem::GUID))?;
     info!("CHAIN: {} SimpleFileSystem handles", fs_handles.len());
 
@@ -72,9 +87,20 @@ pub fn chain_load_bootmgfw() -> Result<()> {
         let is_own = own_volume == Some(*handle);
         let mut dir = match fs.open_volume() {
             Ok(d) => d,
-            Err(e) => {
-                info!("CHAIN: open_volume failed on {:?}: {:?} (own={})", handle, e.status(), is_own);
-                continue;
+            Err(e1) => {
+                // One retry after a settle: a freshly reconnected volume may
+                // need a beat before its FAT instance is usable.
+                boot::stall(core::time::Duration::from_millis(200));
+                match fs.open_volume() {
+                    Ok(d) => {
+                        info!("CHAIN: open_volume recovered on {:?} after retry (first: {:?})", handle, e1.status());
+                        d
+                    }
+                    Err(e2) => {
+                        info!("CHAIN: open_volume failed on {:?}: {:?} then {:?} (own={})", handle, e1.status(), e2.status(), is_own);
+                        continue;
+                    }
+                }
             }
         };
         let mut chosen: Option<&CStr16> = None;
