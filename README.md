@@ -65,7 +65,7 @@ V67 payload 与全部资产再生成：`cargo run -p assets -- generate-ad102` /
 | --- | --- |
 | FP16 GEMM 4096（仅本工具解锁） | 49.0–49.3 TFLOPS（stock 29.89，1.65×） |
 | FP16 GEMM 8192（+nvoc 功耗墙） | **60.8–63.1 TFLOPS**（相对 stock ≈ **2.1×**） |
-| GPU 核心时钟峰值 | **3045 MHz** @ 1.000 V |
+| GPU 核心时钟峰值 | **3045 MHz** @ 1.200 V |
 | 板级功耗峰值 | **206.8 W**（芯片 ~163.7 W + 显存 21.8 W + PWR_SRC 24.8 W；16-pin 164.4 W @ 19.8 V） |
 | 温度 | Hot Spot 峰值 **101.8–104.4 °C**，核心 79–81 °C，显存 58–66 °C |
 | 限流原因 | PerCap Reason 在 **Pwr**（功耗墙）与 **Thrm**（热墙）间切换 |
