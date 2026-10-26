@@ -156,6 +156,7 @@ the kmod, our EFI path is structurally identical — expected compatible);
 | --- | --- | --- |
 | AD107 | 4060 Laptop **28e0** | ✅ verified (this repo) |
 | AD107 | 4060 2882 / 4060 Laptop 28a0 / 4050M 28e1 | 🟢 upstream-verified |
+| AD107 | 4050 Laptop **28a1** | 🟡 second ID for the same AD107M die (same card family as 28e1, different batch); absent from the upstream table — path opened, no per-ID silicon evidence |
 | AD106 | 4060Ti 2803 / 4060Ti 16G 2805 | 🟢 |
 | AD104 | 4070Ti 2782 / 4070S 2783 / 4070 2786 | 🟢 |
 | AD103 | 4080S 2702 / 4080 2704 / 4070TiS 2705 / 4070 2709 / 4090M 2757 | 🟢 |

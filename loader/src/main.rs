@@ -103,13 +103,16 @@ fn tx_phase(handle: uefi::Handle) {
         // AD10x (Ada): the full upstream ad102_family() routing table -
         // every listed ID uses the same pinned AD102 booter/payload.
         // Silicon-verified upstream: 2684/2685/2705/2805/2882/28a0/28e1;
-        // verified here: 28e0; the rest are upstream-admitted IDs.
+        // verified here: 28e0; the rest are upstream-admitted IDs. 28a1 is
+        // NVIDIA's other 4050 Laptop ID (same AD107M die as verified-silicon
+        // 28e1, same 28xx block) but missing from upstream's table.
+        // TODO(28a1): first-silicon run should re-verify checklist evidence.
         0x2684 | 0x2685 | 0x2689  // AD102 4090 / 4090D / 4070TiS
         | 0x2702 | 0x2704 | 0x2705 | 0x2709  // AD103 4080S/4080/4070TiS/4070
         | 0x2757  // AD103M 4090 Laptop
         | 0x2782 | 0x2783 | 0x2786  // AD104 4070Ti/4070S/4070
         | 0x2803 | 0x2805  // AD106 4060Ti / 4060Ti 16GB
-        | 0x2882 | 0x28a0 | 0x28e0 | 0x28e1  // AD107 4060/4060L/4060M/4050M
+        | 0x2882 | 0x28a0 | 0x28a1 | 0x28e0 | 0x28e1  // AD107 4060/4060L/4050L/4060M/4050M
         => "ad102",
         // GA10x (Ampere): 3090/3080/3070/3060/3050/CPM170HX...
         0x2204 | 0x2206 | 0x2484..=0x248c | 0x2501 | 0x2503 | 0x2504 | 0x2505
