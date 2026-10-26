@@ -366,7 +366,7 @@ pub fn write_selector(gpu: &TxGpu, name: &str, offset: u32, unlock: u32) -> Resu
 /// memOff=imemVa), DMEM at 0 (the patched signature rides inside the DMEM
 /// section at patch_loc - data_off), BROM PKC params, BOOTVEC=imemVa,
 /// WprMeta address in the mailboxes, start, HALT.
-pub fn booter_fire(gpu: &TxGpu, hdr: &BooterHdr, image: &[u8], meta_dma: u64) -> Result<(), TxError> {
+pub fn booter_fire(gpu: &TxGpu, hdr: &BooterHdr, image: &[u8], meta_addr: u64, local_fb: bool) -> Result<(), TxError> {
     const SEC2: u32 = crate::tx::eng::SEC2;
     let sig_dmem = hdr.patch_loc - hdr.data_off;
     // Kernel rule: every HS execute is preceded by an engine reset. After a
@@ -374,6 +374,18 @@ pub fn booter_fire(gpu: &TxGpu, hdr: &BooterHdr, image: &[u8], meta_dma: u64) ->
     // (post-halt reads go badf5620) - the reset re-opens it.
     crate::tx::falcon_reset(gpu, SEC2, crate::tx::eng::SEC2_FBIF, crate::tx::eng::SEC2_FALCON2)?;
     crate::tx::falcon_dma_unblock(gpu, SEC2, crate::tx::eng::SEC2_FBIF)?;
+    if local_fb {
+        // VRAM staging: switch the falcon DMA aperture from coherent sysmem
+        // to LOCAL_FB (kernel_gsp_falcon_ga102.c programs the same two
+        // TRANSCFG fields). Every booter read then stays on-device - no PCIe
+        // transaction, no platform DMA layer in the path.
+        let fbif = crate::tx::eng::SEC2_FBIF;
+        let mut trans = gpu.read32(fbif)?;
+        trans &= !3; // TARGET[1:0]: 1 (coherent sysmem) -> 0 (local FB); MEM_TYPE stays PHYSICAL
+        gpu.write32(fbif, trans);
+        let rb = gpu.read32(fbif)?;
+        info!("BOOTER-VRAM: TRANSCFG TARGET=LOCAL_FB, trans={rb:#010x}");
+    }
     crate::tx::falcon_authority_probe(gpu, SEC2, "SEC2");
     // Kernel BootFromHs loads ONLY the secure code segment, and lands it at
     // physical IMEM 0 (dest=imemPa=0) with virtual tags from imemVa - the
@@ -401,8 +413,8 @@ pub fn booter_fire(gpu: &TxGpu, hdr: &BooterHdr, image: &[u8], meta_dma: u64) ->
         rom_rb.0, rom_rb.1, rom_rb.2, rom_rb.3, hdr.engine_id, hdr.ucode_id & 0xff
     );
     gpu.write32(SEC2 + 0x104, hdr.app_code_off); // BOOTVEC = imemVa
-    gpu.write32(SEC2 + 0x040, meta_dma as u32);
-    gpu.write32(SEC2 + 0x044, (meta_dma >> 32) as u32);
+    gpu.write32(SEC2 + 0x040, meta_addr as u32);
+    gpu.write32(SEC2 + 0x044, (meta_addr >> 32) as u32);
     let cpuctl = gpu.read32(SEC2 + 0x100)?;
     // EXCI clear attempt: SEC2 latches EXCI=0x01000100 across engine resets
     // (GSP clears to 0). If that latch blocks start, clearing it unlocks.
@@ -414,7 +426,7 @@ pub fn booter_fire(gpu: &TxGpu, hdr: &BooterHdr, image: &[u8], meta_dma: u64) ->
         "BOOTER exci probe: pre={exci_pre:#010x} post-clear={exci_post:#010x}; ENG={eng:#010x} (cpuctl={cpuctl:#010x})"
     );
     info!(
-        "BOOTER fire: sec-imem {:#x}+{:#x}@dest0 dmem {:#x}+{:#x} sig@{sig_dmem:#x} meta={meta_dma:#x} cpuctl={cpuctl:#x}",
+        "BOOTER fire: sec-imem {:#x}+{:#x}@dest0 dmem {:#x}+{:#x} sig@{sig_dmem:#x} meta={meta_addr:#x} cpuctl={cpuctl:#x}",
         hdr.app_code_off, hdr.app_code_size, hdr.data_off, hdr.data_size
     );
     if cpuctl & (1 << 6) != 0 {
@@ -492,10 +504,24 @@ pub fn booter_fire_direct(gpu: &TxGpu, hdr: &BooterHdr, image: &[u8], meta_dma: 
 /// traced exactly this failure to firmware IOMMU (AMD-Vi) translation
 /// during boot services - resolved by disabling it. SVM (AMD-V) verified
 /// harmless with it on (R9000P 7945HX); Intel VT-x/VT-d likewise.
-fn wpr_desc_rejected_hint(mbox0: u32) {
+///
+/// The CPU-side readback of the meta page turns the inference into direct
+/// evidence: our pack is a plain DRAM store, so an intact magic while the
+/// booter reports a bad descriptor pins the fault on the device-to-host
+/// read path (firmware IOMMU remap). A corrupt magic instead indicts the
+/// buffer itself - our bug, not the platform.
+fn wpr_desc_rejected_hint(mbox0: u32, meta: &[u8]) {
     if (0x89..=0x90).contains(&mbox0) {
         info!("POST-BOOT: status 0x89-0x90 = WPR descriptor (WprMeta) rejected on DMA readback");
         info!("POST-BOOT: platform hint - turn firmware IOMMU (AMD-Vi) OFF in BIOS (SVM/AMD-V and Intel VT-x/VT-d are verified harmless)");
+        if meta.len() >= 16 {
+            let got = rd64(meta, 0);
+            if got == WPR_META_MAGIC {
+                info!("POST-BOOT: CPU readback of the meta page: magic intact ({got:#018x}) - our write landed in DRAM, the booter's DMA read is what came back garbage");
+            } else {
+                info!("POST-BOOT: CPU readback of the meta page: magic CORRUPT (got {got:#018x}, want {:018x}) - buffer-side problem, not platform DMA", WPR_META_MAGIC);
+            }
+        }
     }
 }
 
@@ -503,8 +529,10 @@ fn wpr_desc_rejected_hint(mbox0: u32) {
 /// the mailbox marker. Chain-replay mode (stock booter): the booter's own
 /// status (mailbox0 == 0, kernel s_executeBooterUcode semantics) plus WPR2
 /// still up - the stock booter never touches the PLM selectors, so
-/// demanding unlock values here would fail a correct run.
-pub fn verify_execution(gpu: &TxGpu, payload_mode: bool) -> Result<(), TxError> {
+/// demanding unlock values here would fail a correct run. `meta` is the
+/// host view of the published WprMeta DMA page, for the failure-path
+/// readback in `wpr_desc_rejected_hint`.
+pub fn verify_execution(gpu: &TxGpu, payload_mode: bool, meta: &[u8]) -> Result<(), TxError> {
     let plm = gpu.pci.bar_read_u32(gpu.bar, crate::tx::regs::FEAT_PLM as u64);
     let ss0 = gpu.pci.bar_read_u32(gpu.bar, crate::tx::regs::FEAT_SS0 as u64);
     let ss1 = gpu.pci.bar_read_u32(gpu.bar, crate::tx::regs::FEAT_SS1 as u64);
@@ -515,7 +543,7 @@ pub fn verify_execution(gpu: &TxGpu, payload_mode: bool) -> Result<(), TxError> 
     if !payload_mode {
         if mbox0 != 0 {
             info!("POST-BOOT: booter status {mbox0:#x} (nonzero = failed)");
-            wpr_desc_rejected_hint(mbox0);
+            wpr_desc_rejected_hint(mbox0, meta);
             return Err(TxError::EIO);
         }
         if wpr_hi >> 4 == 0 {
@@ -525,6 +553,8 @@ pub fn verify_execution(gpu: &TxGpu, payload_mode: bool) -> Result<(), TxError> 
         return Ok(());
     }
     if plm != 0xffff_ffff {
+        info!("POST-BOOT: PLM still locked - the payload's four writes did not happen");
+        wpr_desc_rejected_hint(mbox0, meta);
         return Err(TxError::EIO);
     }
     let wprcfg = gpu.pci.bar_read_u32(gpu.bar, crate::tx::regs::WPRCFG_PLM as u64);
@@ -542,7 +572,7 @@ pub fn verify_execution(gpu: &TxGpu, payload_mode: bool) -> Result<(), TxError> 
     }
     if mbox0 != 0x67b0_0001 {
         info!("POST-BOOT: mailbox0 marker={mbox0:#x}");
-        wpr_desc_rejected_hint(mbox0);
+        wpr_desc_rejected_hint(mbox0, meta);
         return Err(TxError::EIO);
     }
     Ok(())

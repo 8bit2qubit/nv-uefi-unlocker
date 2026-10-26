@@ -809,6 +809,15 @@ pub struct TxAssets {
 pub fn run_transaction(gpu: &TxGpu, assets: &TxAssets, pci_handle: uefi::Handle) -> Result<(), TxError> {
     info!("TX: BEGIN (phases: detach claim pre-flr scrub gfw layout fwsec booter verify selectors restore flr)");
 
+    // Experimental override (\tx-force-continue.txt): on a booter-stage
+    // failure, continue the unwind with a selector probe instead of
+    // aborting. Default OFF; see the FORCE-CONTINUE banner at the failure
+    // site for what the experiment can and cannot show.
+    let force_continue = read_boot_file("\\tx-force-continue.txt").is_some();
+    if force_continue {
+        info!("TX: force-continue marker present - booter-stage failures fall through to the selector probe");
+    }
+
     // Resume-entry preflight FIRST, before anything is detached or written:
     // a non-D0 entry means the firmware did not POST this card (sleep/resume
     // or fast-startup handoff), which changes what the Windows driver will
@@ -928,28 +937,131 @@ pub fn run_transaction(gpu: &TxGpu, assets: &TxAssets, pci_handle: uefi::Handle)
     let _bridge_master = crate::pci::BridgeMaster::enable(gpu.pci);
     crate::pci::log_dma_path("after-bridge-bme", gpu.pci);
 
-    // Portal placement needs the HOST pointer to the patched image.
-    let booter_view = unsafe { core::slice::from_raw_parts(booter_dma.host, booter_len) };
-    tb::booter_fire(gpu, &hdr, booter_view, meta_dma.dev)?;
-    info!("TX: booter fired");
-
-    tb::verify_execution(gpu, payload_mode)?;
-    info!("TX: execution verified");
-
-    // Selectors (payload mode: PLM open -> host writes stick).
-    if payload_mode {
-        tb::write_selector(gpu, "SS0", 0x0082_381c, tb::SS0_UNLOCK)?;
-        tb::write_selector(gpu, "SS1", 0x0082_3820, tb::SS1_UNLOCK)?;
-        info!("SELECTOR RESULT: SS0={:#x} SS1={:#x}", tb::SS0_UNLOCK, tb::SS1_UNLOCK);
-        // Stock signature restore BEFORE FLR.
-        let meta = unsafe { core::slice::from_raw_parts_mut(meta_dma.host, tb::WPR_META_SIZE) };
-        tb::signature_restore(meta, stock_dma.dev, assets.stock_sig.len() as u64);
+    // VRAM fallback staging (\tx-meta-in-vram.txt): put everything the booter
+    // DMA-reads (meta, signature, radix + RM image, boot image) into the GPU's
+    // own framebuffer at FB 16 MiB and switch its FBIF aperture to LOCAL_FB,
+    // so every booter read stays on-device - no PCIe transaction, immune to
+    // bridges without bus master, IOMMUs, and any other platform DMA layer.
+    // One BAR1 bulk copy per stage, magic spot-readback, sysmem fallback.
+    const VRAM_BASE: u64 = 0x0100_0000;
+    const OFF_SIG: u64 = 0x1000;
+    const OFF_STOCK: u64 = 0x1_1000;
+    const OFF_BOOT: u64 = 0x1_2000;
+    const OFF_RADIX: u64 = 0x2_0000;
+    let mut meta_addr = meta_dma.dev;
+    let mut vram_fb = false;
+    if read_boot_file("\\tx-meta-in-vram.txt").is_some() {
+        // Retarget the radix tables in place: every entry moves by the same
+        // delta (tables and leaves are copied as one block).
+        let leaves = assets.gsp_image.len().div_ceil(4096);
+        let sys_leaf0 = radix.dma.dev + ((radix.pages - leaves) * 4096) as u64;
+        let vram_leaf0 = VRAM_BASE + OFF_RADIX + ((radix.pages - leaves) * 4096) as u64;
+        let delta = vram_leaf0 as i64 - sys_leaf0 as i64;
+        {
+            let n = (radix.pages - leaves) * 4096;
+            let tbl = unsafe { core::slice::from_raw_parts_mut(radix.dma.host, n) };
+            for e in 0..n / 8 {
+                let at = e * 8;
+                let v = u64::from_le_bytes(tbl[at..at + 8].try_into().unwrap());
+                if v != 0 {
+                    tbl[at..at + 8].copy_from_slice(&((v as i64 + delta) as u64).to_le_bytes());
+                }
+            }
+        }
+        {
+            let meta = unsafe { core::slice::from_raw_parts_mut(meta_dma.host, tb::WPR_META_SIZE) };
+            tb::wpr_meta_pack(meta, &layout, 1 << 20,
+                              VRAM_BASE + OFF_SIG, sig_size as u64, VRAM_BASE + OFF_RADIX,
+                              assets.gsp_image.len() as u64, VRAM_BASE + OFF_BOOT, &boot)?;
+        }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        info!("TX: stock signature restored");
+        let stages: [(u64, u64, u64); 5] = [
+            (VRAM_BASE, meta_dma.host as u64, tb::WPR_META_SIZE as u64),
+            (VRAM_BASE + OFF_SIG, sig_dma.host as u64, sig_size as u64),
+            (VRAM_BASE + OFF_STOCK, stock_dma.host as u64, assets.stock_sig.len() as u64),
+            (VRAM_BASE + OFF_BOOT, boot_dma.host as u64, assets.gsp_boot.len() as u64),
+            (VRAM_BASE + OFF_RADIX, radix.dma.host as u64, (radix.pages * 4096) as u64),
+        ];
+        let mut written = true;
+        for (dst, host, len) in stages {
+            let buf = unsafe { core::slice::from_raw_parts(host as *const u8, len as usize) };
+            if gpu.pci.bar_write_buf(1, dst, buf) != uefi::Status::SUCCESS {
+                written = false;
+                break;
+            }
+        }
+        let (lo, hi) = (gpu.pci.bar_read_u32(1, VRAM_BASE), gpu.pci.bar_read_u32(1, VRAM_BASE + 4));
+        if written && lo == 0x371a_60b3 && hi == 0xdc3a_ae21 {
+            info!("TX-VRAM: fallback staged at FB {VRAM_BASE:#x} (meta/sig/stock/boot/radix+image, magic readback ok) - booter aperture switches to LOCAL_FB, its reads never cross PCIe");
+            meta_addr = VRAM_BASE;
+            vram_fb = true;
+        } else {
+            info!("TX-VRAM: staging failed (write status or magic readback {lo:#010x} {hi:#010x}) - staying on sysmem meta at {:#x} (the bridge BME fix covers the platform path)", meta_dma.dev);
+        }
     }
 
-    tb::flr_phase(gpu, payload_mode)?;
-    info!("POST-FLR: verified (selectors survive AON)");
+    // Portal placement needs the HOST pointer to the patched image.
+    let booter_view = unsafe { core::slice::from_raw_parts(booter_dma.host, booter_len) };
+    tb::booter_fire(gpu, &hdr, booter_view, meta_addr, vram_fb)?;
+    if meta_addr != meta_dma.dev {
+        let lo = gpu.pci.bar_read_u32(1, meta_addr);
+        let hi = gpu.pci.bar_read_u32(1, meta_addr + 4);
+        info!("TX-VRAM: post-fire BAR1 readback: {lo:#010x} {hi:#010x} (want 0x371a60b3 0xdc3aae21 - the booter only reads this page, so intact = nothing stomped it)");
+    }
+    info!("TX: booter fired");
+
+    let meta_view = unsafe { core::slice::from_raw_parts(meta_dma.host, tb::WPR_META_SIZE) };
+    let booter_ok = tb::verify_execution(gpu, payload_mode, meta_view).is_ok();
+    if !booter_ok && !force_continue {
+        return Err(TxError::EIO);
+    }
+    if booter_ok {
+        info!("TX: execution verified");
+    } else {
+        // FORCE-CONTINUE theory of the experiment: the payload ROP sits
+        // strictly downstream of wpr_desc_validate (validate meta -> THEN
+        // signature DMA -> stack smash -> four writes), so a 0x89 means the
+        // V67 blob was never DMA'd and no unlock is reachable on this run.
+        // What continues is pure observation: two selector writes under a
+        // locked PLM, expected to be silently dropped (readback = fuse
+        // values), then the same FLR + handoff unwind as a plain failure.
+        info!("TX: FORCE-CONTINUE: booter failed but the marker file demands the unwind - selector probe under locked PLM follows (expected readback: fuse values unchanged; the payload ROP never ran)");
+    }
+
+    if payload_mode {
+        if booter_ok {
+            tb::write_selector(gpu, "SS0", 0x0082_381c, tb::SS0_UNLOCK)?;
+            tb::write_selector(gpu, "SS1", 0x0082_3820, tb::SS1_UNLOCK)?;
+            info!("SELECTOR RESULT: SS0={:#x} SS1={:#x}", tb::SS0_UNLOCK, tb::SS1_UNLOCK);
+            // Stock signature restore BEFORE FLR. In VRAM mode the booter
+            // consumed the VRAM copy, so repack with the VRAM stock address
+            // and re-publish the page over BAR1.
+            let meta = unsafe { core::slice::from_raw_parts_mut(meta_dma.host, tb::WPR_META_SIZE) };
+            if vram_fb {
+                tb::signature_restore(meta, VRAM_BASE + OFF_STOCK, assets.stock_sig.len() as u64);
+                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+                let buf = unsafe { core::slice::from_raw_parts(meta_dma.host, tb::WPR_META_SIZE) };
+                let _ = gpu.pci.bar_write_buf(1, meta_addr, buf);
+                info!("TX: stock signature restored (VRAM meta page re-published)");
+            } else {
+                tb::signature_restore(meta, stock_dma.dev, assets.stock_sig.len() as u64);
+                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+                info!("TX: stock signature restored");
+            }
+        } else {
+            // Probe: the same two writes, but a readback mismatch is the
+            // EXPECTED verdict under a locked PLM and must not abort the
+            // unwind. No signature restore - the booter never consumed the
+            // meta page.
+            let _ = tb::write_selector(gpu, "SS0", 0x0082_381c, tb::SS0_UNLOCK);
+            let _ = tb::write_selector(gpu, "SS1", 0x0082_3820, tb::SS1_UNLOCK);
+            info!("FORCE-SELECTOR probe done (the selector read lines above carry the verdict)");
+        }
+    }
+
+    let flr_expect_unlock = payload_mode && booter_ok;
+    tb::flr_phase(gpu, flr_expect_unlock)?;
+    info!("POST-FLR: verified{}", if flr_expect_unlock { " (selectors survive AON)" } else { "" });
 
     // Restore the display path before handing off (TOTORONG craft): the
     // FLR-rebooted function re-binds its vendor GOP/driver stack. Non-fatal
