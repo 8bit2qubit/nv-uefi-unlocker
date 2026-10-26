@@ -61,6 +61,10 @@ nvoc's kmd removes the power/voltage wall inside the OS. They stack.
 
 ### Measured extremes (RTX 4060 Laptop 28e0, FP16 GEMM + nvoc)
 
+> All FP-precision throughput figures in this document were measured with
+> [cli-stressor-cuda-rs](https://github.com/Skyworks-Neo/nvoc/tree/main/cli-stressor-cuda-rs)
+> from [Skyworks-Neo/nvoc](https://github.com/Skyworks-Neo/nvoc).
+
 | State | Value |
 | --- | --- |
 | FP16 GEMM 4096 (this tool only) | 49.0–49.3 TFLOPS (stock 29.89, 1.65×) |

@@ -54,7 +54,12 @@ V67 payload 与全部资产再生成：`cargo run -p assets -- generate-ad102` /
 （FEAT/WPR/WPRCFG PLM），nvoc kmd 在操作系统内解除功耗/电压墙——两者作用于
 不同层级，可叠加，推荐配合使用以获得极限性能。
 
-### 组合实测极限（RTX 4060 Laptop 28e0，cli-stressor-rs FP16 GEMM + nvoc）
+### 组合实测极限（RTX 4060 Laptop 28e0，FP16 GEMM + nvoc）
+
+> 本文所有 FP 精度吞吐数据均由
+> [Skyworks-Neo/nvoc](https://github.com/Skyworks-Neo/nvoc) 的
+> **[cli-stressor-cuda-rs](https://github.com/Skyworks-Neo/nvoc/tree/main/cli-stressor-cuda-rs)**
+> 测得。
 
 | 工况 | 数值 |
 | --- | --- |
