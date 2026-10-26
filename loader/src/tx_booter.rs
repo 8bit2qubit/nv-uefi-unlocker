@@ -453,7 +453,13 @@ pub fn booter_fire(gpu: &TxGpu, hdr: &BooterHdr, image: &[u8], meta_addr: u64, l
     let cpuctl_now = gpu.pci.bar_read_u32(gpu.bar, (SEC2 + 0x100) as u64);
     let mbox0 = gpu.pci.bar_read_u32(gpu.bar, (SEC2 + 0x40) as u64);
     let exci = gpu.pci.bar_read_u32(gpu.bar, (SEC2 + 0x0d0) as u64);
-    info!("BOOTER forensic: CPUCTL={cpuctl_now:#010x} MAILBOX0={mbox0:#010x} EXCI={exci:#010x}");
+    // VRAM-staging audit: if we switched the aperture to LOCAL_FB pre-start,
+    // this tells us whether it survived to the end (0x114) or was re-set to
+    // coherent sysmem (0x115) somewhere between our write and the meta DMA -
+    // the difference decides whether VRAM staging is architecturally
+    // reachable at all.
+    let trans_now = gpu.read32(crate::tx::eng::SEC2_FBIF).unwrap_or(0);
+    info!("BOOTER forensic: CPUCTL={cpuctl_now:#010x} MAILBOX0={mbox0:#010x} EXCI={exci:#010x} TRANSCFG={trans_now:#010x}");
     r?;
     Ok(())
 }
