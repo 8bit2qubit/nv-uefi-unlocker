@@ -72,11 +72,15 @@ pub fn chain_load_bootmgfw() -> Result<()> {
         let is_own = own_volume == Some(*handle);
         let mut dir = match fs.open_volume() {
             Ok(d) => d,
-            Err(_) => continue,
+            Err(e) => {
+                info!("CHAIN: open_volume failed on {:?}: {:?} (own={})", handle, e.status(), is_own);
+                continue;
+            }
         };
         let mut chosen: Option<&CStr16> = None;
         for path in CANDIDATES {
-            if *path == CANDIDATES[CANDIDATES.len() - 1] && is_own {
+            let is_generic = *path == CANDIDATES[CANDIDATES.len() - 1];
+            if is_generic && is_own {
                 continue; // never relaunch ourselves from our own stick
             }
             if dir
@@ -87,7 +91,10 @@ pub fn chain_load_bootmgfw() -> Result<()> {
                 break;
             }
         }
-        let Some(path) = chosen else { continue };
+        let Some(path) = chosen else {
+            info!("CHAIN: no candidate found on {:?} (own={})", handle, is_own);
+            continue;
+        };
         info!("CHAIN: loader found on {:?}: {}", handle, path);
 
         // Safety: same ByHandleProtocol discipline for the device path.
