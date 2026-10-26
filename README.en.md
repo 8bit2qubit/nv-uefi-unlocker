@@ -197,7 +197,7 @@ the kmod, our EFI path is structurally identical — expected compatible);
 | AD107 | 4060 Laptop **28e0** | ✅ verified (this repo) |
 | AD107 | 4060 2882 / 4060 Laptop 28a0 / 4050M 28e1 | 🟢 upstream-verified |
 | AD107 | 4050 Laptop **28a1** | ✅ verified (2026-10-26, v0.1.3): full chain on silicon (WPR2 verified → booter marker → four writes → selectors → signature restore → AON survival after FLR); FP16 tensor **22 → 38-42 TFLOPS (1.7-1.9x)**, integrity self-tests green; the gated `0xbadf1301` goes through the fallback |
-| AD106 | 4060Ti 2803 / 4060Ti 16G 2805 | 🟢 |
+| AD106 | 4060Ti 2803 / 4060Ti 16G 2805 | **2803 ✅ verified** (PR #5, AD106 desktop: replay + unlock + four writes read back, FP16 46.78→75.28 TFLOPS); 2805 🟢 |
 | AD104 | 4070Ti 2782 / 4070S 2783 / 4070 2786 | 🟢 |
 | AD103 | 4080S 2702 / 4080 2704 / 4070TiS 2705 / 4070 2709 / 4090M 2757 | 🟢 |
 | AD102 | 4090 2684 / 4090D 2685 / 4070TiS 2689 | 🟢 |
@@ -220,24 +220,41 @@ points (card model + key log lines + verdict values) are welcome in
 [Discussions](https://github.com/physicsdolphin/nv-uefi-unlocker/discussions)
 to extend the matrix.
 
-### Known platform limitation: AMD firmware IOMMU (AMD-Vi) -> `booter status 0x89`
+### Known issue (fixed in the loader): booter status 0x89 = Bus Master not enabled on the GPU's upstream PCI bridge
 
 **Symptom**: the log reaches `POST-BOOT: booter status 0x89 (nonzero =
-failed)` and the transaction aborts with EIO (issue #1, 4050 LP 28E1 on an
-AMD desktop; resolved by the reporter disabling the related BIOS options).
-Codes `0x89`-`0x90` belong to the booter's WPR-descriptor validation
-(`wpr_desc_validate`): the 256-byte WprMeta the booter DMA-read back does
-not match what was written.
+failed)` and the transaction aborts with EIO. Codes `0x89`-`0x90` belong to
+the booter's WPR-descriptor validation (`wpr_desc_validate`): the 256-byte
+WprMeta the booter DMA-read back is not what was written.
 
-**Mechanism**: the booter stage is the transaction's **first host-side DMA
-consumer** (everything before it — scrubber/FWSEC — uses portal copies and
-PROM reads only). The loader hands the booter raw physical addresses and
-relies on identity mapping during boot services; on some AMD desktop boards
-the firmware IOMMU (AMD-Vi) translates in that stage, so device DMA reads
-garbage and the descriptor check fails.
+**Root cause** (PR #5, found and fixed by
+[@8bit2qubit](https://github.com/8bit2qubit)): the booter stage is the
+transaction's **first device-initiated host DMA** (everything before it —
+scrubber/FWSEC — uses portal copies and PROM reads, no device DMA). Desktop
+firmware typically leaves **Bus Master disabled on the GPU's upstream PCI
+bridge** during boot services (the firmware never DMA'd through the GPU this
+boot — GOP display works through CPU-side MMIO, while the Bus Master bit only
+gates **device-initiated** bus transactions). The GPU's DMA requests are
+terminated at the root port: the GPU's PCI status bit13 `Received Master
+Abort` sets, the read returns all-1s, and the descriptor check fails. This is
+independent of the chipset vendor: reproduced on H310 / B760 / B850 desktops.
 
-**Fix**: turn **IOMMU (AMD-Vi) OFF** in BIOS, re-run replay mode (expect
-`MAILBOX0=0`), then add the payload.
+**Fix**: built into the loader (PR #5 merged) — before firing the booter, the
+loader enables Bus Master on every PCI bridge along the GPU's upstream path
+that does not have it set, verifies by readback, and restores the original
+state when the transaction ends; the log keeps `DMA-PATH` / `BRIDGE-BME`
+lines. Single-variable verified on an AD106 4060 Ti desktop (2803): 0x89
+before the fix → after the fix, replay `MAILBOX0=0`, unlock marker + all four
+writes read back verified, FP16 46.78 → **75.28** TFLOPS
+(`docs/evidence/ad106-4060ti-desktop/`; full mechanism in
+`docs/bridge-bme-root-cause.md`).
+
+**Historical correction**: this section previously attributed 0x89 to
+firmware IOMMU (AMD-Vi) / TSME translation — disproven. The root cause is the
+bridge Bus Master bit; the "stage everything in VRAM to bypass platform DMA"
+fallback was also disproven by experiment (the booter's DMA goes through its
+own virtual address mapping, identity-mapped to host sysmem; switching the
+FBIF TARGET has no effect), see `docs/bridge-bme-root-cause.md`.
 
 **Verified harmless** (no need to disable):
 
@@ -247,8 +264,8 @@ garbage and the descriptor check fails.
   both enabled on the reference machines.
 
 > Terminology note: the Task Manager "Virtualization" field only reflects
-> SVM/VT-x. IOMMU (AMD-Vi) is a separate firmware DMA-remapping option,
-> only visible in BIOS setup.
+> SVM/VT-x. The bridge Bus Master bit is PCI Command Register bit 2 and has
+> nothing to do with "Virtualization".
 
 > The maintainer works on this **part-time** and may not see or answer
 > issues immediately — logs are kept and will be reviewed. Patience
