@@ -2,20 +2,21 @@
 
 对象：`reference/AD103_win_unlocker`（Windows UEFI 预驱动解锁的唯一先例，
 RTX 4080 AD103 32GB 单卡实验）。结论：**链形状与我们同源且一致**（他们的
-交易体就是社区 unlock_610.c 经 compat 垫片直接编译进 EFI）；载具工艺有
-四处我们已采纳的差距，一处有意不采纳。
+交易体就是社区 unlock_610.c 经 compat 垫片直接编译进 EFI）；载具工艺多处
+差距已采纳（见"本轮已采纳"）；GOP 重连初判不采纳、后已转入采纳
+（58b258f）；停机纪律与逐板钉死有意保持分歧。
 
 ## 逐点对照
 
 | 点 | TOTORONG | 我们 | 裁决 |
 |---|---|---|---|
 | 交易体 | vendor unlock_610.c（社区原版）+ compat.c 内核 API 垫片 | tx.rs 1:1 移植同一源 | **一致**（同源） |
-| 链形状 | claim→gfw→layout→fwsec→booter→selectors→FLR，**无 scrubber** | 同（scrubber 已改非致命尝试） | **一致** |
+| 链形状 | claim→gfw→layout→fwsec→booter→selectors→FLR，**无 scrubber** | 同形 + 差异项：我们加跑**内核同款 scrubber**（BSI handoff 1→3，SEC2/GSP 域解锁——booter 能点火的前提） | 同源；scrubber 是我们独有的第 7 步 |
 | 入口门 | chip==钉值、WPR2 hi>>4、PLM==0xffffff8f、SS0&0x88888888==0、SS1==7（逐板钉死）、VRAM 钉值 | family 表 + EALREADY/EBUSY 语义 | 一致方向；他们逐板钉死（单卡实验），我们按族（多卡工具）——各有立场 |
 | FLR | GuFlr：等 Transactions Pending 清零→FLR 位**保留**其余 devctl→**100ms 全静默**→等 config 身份复原→恢复（解码关、高 BAR 先、ROM 不开解码、BME 永不还原） | 旧实现：写 0x8000 **清掉整个 devctl**、无 pending 等待、无静默即读 BAR、升序恢复 | **他们正确——已修**（flr_once + flr_phase 两处） |
 | PCI 恢复 | 高 BAR dword 先于低、command 最后且 &~4（永不还原 BME）、逐值读回验证 | 升序全还原 | **他们正确——已修** |
 | BME | 事务中 set_master（GuEnableMaster），结束后 GuClearMaster 收容 | claim 时 attributes_enable(0x7)，FLR 前清 | 一致 |
-| GOP | 断开 vendor 驱动→事务→**ConnectController 恢复**→DisplayCheck→config/BAR 复核→POST-GOP selectors | 断开不重连，直接 LoadImage bootmgfw（bootmgfw 自行重建 GOP） | 有意不采纳：两台实机链回已验证可显示；重连反而多一步风险。保留 §7.5 差异记录 |
+| GOP | 断开 vendor 驱动→事务→**ConnectController 恢复**→DisplayCheck→config/BAR 复核→POST-GOP selectors | 断开 → 事务 → FLR → **`reconnect_all` 递归 ConnectController**（58b258f 采纳，原判"不采纳"已反转）→ LoadImage bootmgfw | **已采纳**：FLR 后卡回冷态，重连让固件 BDS 重新发现设备、恢复 console；失败非致命（bootmgfw 自建 GOP 兜底） |
 | 链回 | 预载 bootmgfw（事务前 LoadImage）→成功后 StartImage | 事务后 LoadImage/StartImage | 一致语义；他们预载避免事务后分配。可选优化 |
 | Secure Boot | 读 SecureBoot 变量，非 0 拒绝 | 未检查（宪法要求实验机关闭） | 候选：加变量检查作显式报错（API 待接） |
 | 卡身份 | PCI RomImage SHA-256 钉死 + PROM BAR 视图 SHA-256 双重钉板 | vendor:device + NV_PROM crc32 记录 | 他们更强（单卡可钉死）。候选：loader 加 no_std sha256，按机钉 PROM hash |
@@ -31,10 +32,11 @@ RTX 4080 AD103 32GB 单卡实验）。结论：**链形状与我们同源且一�
    （解码关→BAR 高到低→command 去 BME 最后）。
 2. FBPA 判据 0xffffff0f/0xffffffff 双接受（上一轮，28e1 对照）。
 3. scrubber 非致命 + EALREADY=skip（上一轮，unlock_610 对照）。
+4. **GOP 重连** `reconnect_all`（递归 ConnectController，失败非致命）+
+   多 bootloader 候选回退（58b258f）——初判"不采纳"已反转，见上表 GOP 行。
 
 ## 有意不采纳
 
-- GOP 重连（我们的链回路径实机已验证，bootmgfw 自建 GOP）。
 - STOP 即 Halt 死循环（我们的 FLR 交还已验证可恢复；两者满足同一宪法
   条款"STOP 后不重试"，恢复手段不同）。
 - 逐板钉死入口值（SS1==7 等）：他们是单卡实验，我们是多卡工具；族级

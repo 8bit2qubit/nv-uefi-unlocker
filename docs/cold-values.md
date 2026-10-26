@@ -22,9 +22,31 @@
 | NV_PROM 64K | crc32 0x552e185c | 本卡身份 |
 | post-FLR GFW_BOOT | 0x101 卡住 | 与 AD107 一致（跨代 FLR 行为）
 
-## GA106（RTX 3060，10de:2504）——M4 候选机
+## GA106（RTX 3060，10de:2504）——未采样
 
-不在本轮范围（M4 单独立项）。
+原 M4 候选机。M4 实际在 AD107M 28e0 上闭环（见 `ada28e0-uefi-report.md`）；
+GA106 卡在库未采样，本节待实机后补。
+
+## AD107 台式（RTX 4050 LP，10de:28e1）——社区采样（issue #1，2026-10-26）
+
+非本机实测：报告者 U 盘 `\loader.log` 的 SAMPLE 段（AMD 台式机 + 15bf iGPU，
+dGPU 非 console owner，1 个 GOP 句柄）。首张台式 AD107 样本，6GB 与 28a1 同
+几何。采样当时事务被**平台固件 IOMMU（AMD-Vi）**挡在 booter（status 0x89 =
+wpr_desc_validate 拒收 WprMeta DMA 读回）；报告者关闭 BIOS 相关选项后全链
+通过——平台 DMA 前提见 README"已知平台限制"节。
+
+| 寄存器 | 值 | 解读 |
+|---|---|---|
+| PMC_BOOT_0 | 0x197000a1 | AD107 ✓ |
+| FB_SIZE_MIB | 0x17fd（6141MiB） | 6GB 布局（与 28a1 同） |
+| VGA_WORKSPACE | 0x00000001 | 非 console owner 的健康回退值（bit3=0，与 28a1 毒值路径同判） |
+| SEC2_CPUCTL | 0xbadf5620 | 与 28e0/28a1 相同的冷态域门控（复位+scrubber 清散） |
+| FEAT_READOUT_1 | 0x00410080 | 与 28e0 逐位一致（字段 2/5/7=2） |
+| FEAT SS0 / SS1 | 0x60042107 / 0x6 | 本卡熔丝派生冷值（非覆盖态；SS 漂移族 n=1） |
+| WPR/WPRCFG PLM | 0x0004cb8f / 0x0004cb8f | 与 28e0 冷值一致（四写目标在位） |
+| FBPA_PLM | 0xffffff0f | 与全系 AD107 一致 |
+| WPR2_LO/HI | 0x1ffffe00 / 0x0 | 空窗口默认态，hi=0 守卫放行 |
+| FUSE_VER / 总开关 | 0x1 / 0x0 | 签名槽 v1；解锁域存在 |
 
 ## AD107M（RTX 4060 Laptop，10de:28e0）——已采样（2026-10-25，见 evidence/m1-ad107-laptop/）
 
