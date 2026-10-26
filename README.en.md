@@ -220,6 +220,36 @@ points (card model + key log lines + verdict values) are welcome in
 [Discussions](https://github.com/physicsdolphin/nv-uefi-unlocker/discussions)
 to extend the matrix.
 
+### Known platform limitation: AMD firmware IOMMU (AMD-Vi) -> `booter status 0x89`
+
+**Symptom**: the log reaches `POST-BOOT: booter status 0x89 (nonzero =
+failed)` and the transaction aborts with EIO (issue #1, 4050 LP 28E1 on an
+AMD desktop; resolved by the reporter disabling the related BIOS options).
+Codes `0x89`-`0x90` belong to the booter's WPR-descriptor validation
+(`wpr_desc_validate`): the 256-byte WprMeta the booter DMA-read back does
+not match what was written.
+
+**Mechanism**: the booter stage is the transaction's **first host-side DMA
+consumer** (everything before it — scrubber/FWSEC — uses portal copies and
+PROM reads only). The loader hands the booter raw physical addresses and
+relies on identity mapping during boot services; on some AMD desktop boards
+the firmware IOMMU (AMD-Vi) translates in that stage, so device DMA reads
+garbage and the descriptor check fails.
+
+**Fix**: turn **IOMMU (AMD-Vi) OFF** in BIOS, re-run replay mode (expect
+`MAILBOX0=0`), then add the payload.
+
+**Verified harmless** (no need to disable):
+
+- **SVM (AMD-V)**: R9000P 7945HX with SVM on (Task Manager "Virtualization:
+  Enabled") unlocks normally;
+- **Intel VT-x (virtualization) and VT-d**: full chain verified green with
+  both enabled on the reference machines.
+
+> Terminology note: the Task Manager "Virtualization" field only reflects
+> SVM/VT-x. IOMMU (AMD-Vi) is a separate firmware DMA-remapping option,
+> only visible in BIOS setup.
+
 > The maintainer works on this **part-time** and may not see or answer
 > issues immediately — logs are kept and will be reviewed. Patience
 > appreciated.

@@ -193,6 +193,30 @@ claim(断 GOP/驱动+独占) → scrubber(BSI handoff 1→3) → FWSEC-FRTS(WPR2
 [Discussions](https://github.com/physicsdolphin/nv-uefi-unlocker/discussions)
 分享成功/失败数据点（卡型号 + 关键日志行 + 判据值），帮助扩展矩阵。
 
+### 已知平台限制：AMD 主板固件 IOMMU（AMD-Vi）→ `booter status 0x89`
+
+**现象**：日志走到 `POST-BOOT: booter status 0x89 (nonzero = failed)`，事务以
+EIO 中止（issue #1，4050 LP 28E1 / AMD 台式机，已由用户关闭 BIOS 相关选项
+闭环解决）。`0x89`–`0x90` 是 booter 的 WPR 描述符校验（`wpr_desc_validate`）
+错误区间：booter 经 DMA 读回的 256 字节 WprMeta 与写入内容不符。
+
+**机理**：booter 阶段是全链**第一个主机侧 DMA** 消费者（之前的 scrubber/
+FWSEC 全是 portal 拷贝与 PROM 读取）。loader 交给 booter 的是裸物理地址，
+依赖 boot services 阶段的恒等映射；部分 AMD 台式主板的固件 IOMMU（AMD-Vi）
+在该阶段做地址翻译，设备 DMA 读到垃圾，描述符校验即失败。
+
+**处置**：进 BIOS 关闭 **IOMMU（AMD-Vi）**，重跑回放模式（预期
+`MAILBOX0=0`），再上 payload。
+
+**实测不影响**（无需关闭）：
+
+- **SVM（AMD-V）**：R9000P 7945HX 开启 SVM（任务管理器"虚拟化：启用"）
+  解锁照常工作；
+- **Intel VT-x（虚拟化）与 VT-d**：验证机开启状态下全链实测通过。
+
+> 术语注意：任务管理器的"虚拟化"只反映 SVM/VT-x；IOMMU（AMD-Vi）是独立的
+> 固件 DMA 重映射选项，只能在 BIOS 里确认，与"虚拟化"显示无关。
+
 > 维护者**非全职**，可能无法随时查看并回复 issue，敬请谅解——日志会保留，
 > 有进展会回。
 

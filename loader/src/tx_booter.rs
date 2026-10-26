@@ -484,6 +484,21 @@ pub fn booter_fire_direct(gpu: &TxGpu, hdr: &BooterHdr, image: &[u8], meta_dma: 
     Ok(())
 }
 
+/// Booter status codes 0x89-0x90 belong to `wpr_desc_validate` (cmp170hx
+/// falcon-and-booter status table; 0x8e/0x8f are that function's later
+/// 0x1ffff-alignment and 0xfff-field checks): the WprMeta the booter
+/// DMA-read back did not match what we packed. The booter stage is the
+/// transaction's first host-DMA consumer, and issue #1 (28E1, AMD desktop)
+/// traced exactly this failure to firmware IOMMU (AMD-Vi) translation
+/// during boot services - resolved by disabling it. SVM (AMD-V) verified
+/// harmless with it on (R9000P 7945HX); Intel VT-x/VT-d likewise.
+fn wpr_desc_rejected_hint(mbox0: u32) {
+    if (0x89..=0x90).contains(&mbox0) {
+        info!("POST-BOOT: status 0x89-0x90 = WPR descriptor (WprMeta) rejected on DMA readback");
+        info!("POST-BOOT: platform hint - turn firmware IOMMU (AMD-Vi) OFF in BIOS (SVM/AMD-V and Intel VT-x/VT-d are verified harmless)");
+    }
+}
+
 /// Execution verdict. Payload mode (V67): the Ada four-PLM read-back plus
 /// the mailbox marker. Chain-replay mode (stock booter): the booter's own
 /// status (mailbox0 == 0, kernel s_executeBooterUcode semantics) plus WPR2
@@ -500,6 +515,7 @@ pub fn verify_execution(gpu: &TxGpu, payload_mode: bool) -> Result<(), TxError> 
     if !payload_mode {
         if mbox0 != 0 {
             info!("POST-BOOT: booter status {mbox0:#x} (nonzero = failed)");
+            wpr_desc_rejected_hint(mbox0);
             return Err(TxError::EIO);
         }
         if wpr_hi >> 4 == 0 {
@@ -526,6 +542,7 @@ pub fn verify_execution(gpu: &TxGpu, payload_mode: bool) -> Result<(), TxError> 
     }
     if mbox0 != 0x67b0_0001 {
         info!("POST-BOOT: mailbox0 marker={mbox0:#x}");
+        wpr_desc_rejected_hint(mbox0);
         return Err(TxError::EIO);
     }
     Ok(())
@@ -541,6 +558,9 @@ pub fn flr_phase(gpu: &TxGpu, payload_mode: bool) -> Result<(), TxError> {
     if payload_mode && (ss0 != SS0_UNLOCK || ss1 != SS1_UNLOCK) {
         return Err(TxError::EIO);
     }
+    // FLR is only defined in D0 (PCIe); on a resume entry the function may
+    // still sit in D3hot where the previous session parked it.
+    let pm = crate::tx::pm_flr_pre(gpu.pci);
     // pci_save_state analog: FLR resets the BARs to 0 - without restoring
     // them the post-FLR BAR polls read 0xffffffff (first flr_phase entry
     // ever failed exactly there, 2026-10-26).
@@ -613,5 +633,6 @@ pub fn flr_phase(gpu: &TxGpu, payload_mode: bool) -> Result<(), TxError> {
     if payload_mode && (ss0 != SS0_UNLOCK || ss1 != SS1_UNLOCK) {
         return Err(TxError::EIO); // AON survival violated
     }
+    crate::tx::pm_flr_post(gpu.pci, pm);
     Ok(())
 }
