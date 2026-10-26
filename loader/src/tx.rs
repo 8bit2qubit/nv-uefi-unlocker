@@ -921,6 +921,13 @@ pub fn run_transaction(gpu: &TxGpu, assets: &TxAssets, pci_handle: uefi::Handle)
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     info!("TX: WprMeta published (payload_mode={payload_mode})");
 
+    // Bus master on the bridges above the GPU, with the DMA path logged before
+    // and after. The guard lives until run_transaction returns, early error
+    // returns included, then clears what it set.
+    crate::pci::log_dma_path("before-bridge-bme", gpu.pci);
+    let _bridge_master = crate::pci::BridgeMaster::enable(gpu.pci);
+    crate::pci::log_dma_path("after-bridge-bme", gpu.pci);
+
     // Portal placement needs the HOST pointer to the patched image.
     let booter_view = unsafe { core::slice::from_raw_parts(booter_dma.host, booter_len) };
     tb::booter_fire(gpu, &hdr, booter_view, meta_dma.dev)?;

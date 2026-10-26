@@ -456,6 +456,134 @@ pub fn enumerate() -> Option<FoundGpu> {
     found
 }
 
+/// Logs the GPU's command, status and device control, then the IDs, command,
+/// status, bus numbers and bridge control of every PCI bridge. Read-only.
+#[cfg(feature = "tx")]
+pub fn log_dma_path(tag: &str, gpu: &PciIo) {
+    // PCIe cap at 0x78: Device Control at +0x08.
+    info!(
+        "DMA-PATH[{tag}]: gpu loc={:?} command={:#06x} status={:#06x} devctl={:#06x}",
+        gpu.get_location(),
+        gpu.config_read_u16(0x04),
+        gpu.config_read_u16(0x06),
+        gpu.config_read_u16(0x78 + 0x08)
+    );
+    let Ok(handles) = boot::locate_handle_buffer(SearchType::ByProtocol(&PciIo::GUID)) else {
+        info!("DMA-PATH[{tag}]: locate_handle_buffer failed");
+        return;
+    };
+    for handle in handles.iter() {
+        // Safety: GetProtocol performs no driver binding (same as enumerate()).
+        let Ok(pci) = (unsafe {
+            boot::open_protocol::<PciIo>(
+                OpenProtocolParams { handle: *handle, agent: boot::image_handle(), controller: None },
+                OpenProtocolAttributes::GetProtocol,
+            )
+        }) else {
+            continue;
+        };
+        if pci.config_read_u16(0x00) == 0xffff || pci.config_read_u8(0x0e) & 0x7f != 0x01 {
+            continue;
+        }
+        let loc = pci.get_location();
+        let buses = pci.config_read_u32(0x18);
+        info!(
+            "DMA-PATH[{tag}]: bridge {:04x}:{:04x} loc={loc:?} command={:#06x} status={:#06x} pri/sec/sub={}/{}/{} bridgectl={:#06x}",
+            pci.config_read_u16(0x00),
+            pci.config_read_u16(0x02),
+            pci.config_read_u16(0x04),
+            pci.config_read_u16(0x06),
+            buses & 0xff,
+            buses >> 8 & 0xff,
+            buses >> 16 & 0xff,
+            pci.config_read_u16(0x3e)
+        );
+    }
+}
+
+/// Bus-master guard for the PCI bridges between the root complex and the GPU.
+///
+/// `enable` sets COMMAND bit 2 (bus master) on every PCI-to-PCI bridge in the
+/// GPU's segment whose secondary..subordinate range contains the GPU's bus,
+/// only where the bit is clear, and records the bridges whose readback shows it
+/// set. Drop clears bit 2 again on exactly those bridges.
+#[cfg(feature = "tx")]
+pub struct BridgeMaster {
+    /// (bridge handle, location for logs) of every bridge this guard enabled.
+    enabled: alloc::vec::Vec<(uefi::Handle, Option<(usize, usize, usize, usize)>)>,
+}
+
+#[cfg(feature = "tx")]
+impl BridgeMaster {
+    pub fn enable(gpu: &PciIo) -> BridgeMaster {
+        let mut enabled = alloc::vec::Vec::new();
+        let Some((gpu_seg, gpu_bus, _, _)) = gpu.get_location() else {
+            info!("BRIDGE-BME: GPU location unavailable - not touching any bridge");
+            return BridgeMaster { enabled };
+        };
+        let Ok(handles) = boot::locate_handle_buffer(SearchType::ByProtocol(&PciIo::GUID)) else {
+            info!("BRIDGE-BME: locate_handle_buffer failed");
+            return BridgeMaster { enabled };
+        };
+        for handle in handles.iter() {
+            // Safety: GetProtocol performs no driver binding (same as enumerate()).
+            let Ok(pci) = (unsafe {
+                boot::open_protocol::<PciIo>(
+                    OpenProtocolParams { handle: *handle, agent: boot::image_handle(), controller: None },
+                    OpenProtocolAttributes::GetProtocol,
+                )
+            }) else {
+                continue;
+            };
+            if pci.config_read_u16(0x00) == 0xffff || pci.config_read_u8(0x0e) & 0x7f != 0x01 {
+                continue;
+            }
+            let loc = pci.get_location();
+            if loc.map(|(seg, _, _, _)| seg) != Some(gpu_seg) {
+                continue;
+            }
+            let buses = pci.config_read_u32(0x18);
+            let (sec, sub) = ((buses >> 8 & 0xff) as usize, (buses >> 16 & 0xff) as usize);
+            if gpu_bus < sec || gpu_bus > sub {
+                continue;
+            }
+            let before = pci.config_read_u16(0x04);
+            if before & 0x4 != 0 {
+                info!("BRIDGE-BME: {loc:?} already has bus master (command={before:#06x})");
+                continue;
+            }
+            pci.cfg_write_u16(0x04, before | 0x4);
+            let after = pci.config_read_u16(0x04);
+            info!("BRIDGE-BME: {loc:?} command {before:#06x} -> {after:#06x}");
+            if after & 0x4 != 0 {
+                enabled.push((*handle, loc));
+            }
+        }
+        BridgeMaster { enabled }
+    }
+}
+
+#[cfg(feature = "tx")]
+impl Drop for BridgeMaster {
+    fn drop(&mut self) {
+        for (handle, loc) in self.enabled.drain(..) {
+            // Safety: GetProtocol performs no driver binding.
+            let Ok(pci) = (unsafe {
+                boot::open_protocol::<PciIo>(
+                    OpenProtocolParams { handle, agent: boot::image_handle(), controller: None },
+                    OpenProtocolAttributes::GetProtocol,
+                )
+            }) else {
+                info!("BRIDGE-BME: restore {loc:?}: protocol gone");
+                continue;
+            };
+            let now = pci.config_read_u16(0x04);
+            pci.cfg_write_u16(0x04, now & !0x4);
+            info!("BRIDGE-BME: restored {loc:?} command {now:#06x} -> {:#06x}", pci.config_read_u16(0x04));
+        }
+    }
+}
+
 fn describe_nvidia(pci: &PciIo, seg: usize, bus: usize, dev: usize, fun: usize, device: u16) {
     info!(
         "NVIDIA {} {:04x}:{:02x}:{:02x}.{} device {:04x}",
