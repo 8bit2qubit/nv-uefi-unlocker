@@ -1,5 +1,7 @@
 # nv-uefi-unlocker
 
+[中文](README.md) | [English](README.en.md)
+
 UEFI 预驱动 NVIDIA GPU 解锁器（Windows，Rust）。在 NVIDIA 驱动加载**之前**的
 UEFI DXE 时窗执行完整固件事务：SEC2 scrubber → FWSEC-FRTS（WPR2）→ 签名
 Booter 启动 GSP-RM →（门控后）V67 四写 payload → 读回验证 → FLR → 链式交回
@@ -99,6 +101,40 @@ claim(断 GOP/驱动+独占) → scrubber(BSI handoff 1→3) → FWSEC-FRTS(WPR2
 全程只读回验证（marker + HALT + PLM 逐项读回 + FLR 后 AON 存活），失败即
 拒绝并 FLR；无持久化、无刷写、断电即清。详见
 [docs/ada28e0-uefi-report.md](docs/ada28e0-uefi-report.md)。
+
+## 兼容性矩阵
+
+判定依据：本工具按**芯片家族**路由（同一家族共用同一 Booter/payload 资产，
+与上游 `ad102_family()`/GA10x 路由一致）。层级含义：
+✅ 实测验证（本机跑通全链+payload）；🟢 上游硅验证（同家族在 kmod 侧已验证，
+本 EFI 路径同构，预期兼容）；🟡 路径存在未验证（代码就绪，无硅证据）；
+❌ 不兼容。
+
+| 家族 | 卡（device ID） | 层级 |
+| --- | --- | --- |
+| AD107 | 4060 Laptop **28e0** | ✅ 实测（本报告） |
+| AD107 | 4060 2882 / 4060 Laptop 28a0 / 4050M 28e1 | 🟢 上游硅验证（28e1 为 2.00× 实测报告） |
+| AD106 | 4060Ti 2803 / 4060Ti 16G 2805 | 🟢 上游硅验证 |
+| AD104 | 4070Ti 2782 / 4070S 2783 / 4070 2786 | 🟢 上游硅验证 |
+| AD103 | 4080S 2702 / 4080 2704 / 4070TiS 2705 / 4070 2709 / 4090M 2757 | 🟢 上游硅验证 |
+| AD102 | 4090 2684 / 4090D 2685 / 4070TiS 2689 | 🟢 上游硅验证 |
+| GA10x | 3090/3080 2204/2206、3070 系 2484–248c、3060 系 2501/2503–2509/252f/2544、3050 2584、2560、20c2/20f1 | 🟡 上游 kmod 验证，本 EFI 路径无硅证据 |
+| Turing 及更早 | 20 系/16 系/Pascal… | ❌ 无事务轨（Turing 资产已备未启用；Turing 无已知钳制） |
+| Blackwell (50 系) / GA100 | — | ❌ 链路不同，不在范围 |
+
+**"40 系全部都可以吗？"——AD10x（40 系）理论上全部在列**：同家族资产+上游
+逐硅验证构成高置信预期，但除 28e0 外均未经本 EFI 实测。首次使用建议先跑
+**回放模式**（不放 `v67-*.bin`）：走到 `TX: execution verified` 即链路通，
+再上 payload。
+
+**不兼容/异常时**：请提交 U 盘根的 `\loader.log` 全文到
+[Issues](https://github.com/physicsdolphin/nv-uefi-unlocker/issues)（日志含
+完整阶段轨迹，是我们诊断的唯一依据；发前可脱敏机器信息）。也可以在
+[Discussions](https://github.com/physicsdolphin/nv-uefi-unlocker/discussions)
+分享成功/失败数据点（卡型号 + 关键日志行 + 判据值），帮助扩展矩阵。
+
+> 维护者**非全职**，可能无法随时查看并回复 issue，敬请谅解——日志会保留，
+> 有进展会回。
 
 ## 仓库结构
 

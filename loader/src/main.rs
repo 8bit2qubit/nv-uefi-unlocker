@@ -100,11 +100,21 @@ fn tx_phase(handle: uefi::Handle) {
     // nothing). Names on the boot volume: <asset>_<family>.bin.
     let dev = pci.config_read_u16(0x02);
     let family: &str = match dev {
-        // AD10x (Ada): 4090/4090D/4070TiS/4060Ti/4060M...
-        0x2684 | 0x2685 | 0x2705 | 0x2803 | 0x2805 | 0x28a0 | 0x28e0 => "ad102",
-        // GA10x (Ampere): 3090/3080/3070/3060/CPM170HX...
-        0x2204 | 0x2206 | 0x2484..=0x248c | 0x2503 | 0x2504 | 0x2505 | 0x2507
-        | 0x2544 | 0x2560 | 0x20c2 | 0x20f1 => "ga102",
+        // AD10x (Ada): the full upstream ad102_family() routing table -
+        // every listed ID uses the same pinned AD102 booter/payload.
+        // Silicon-verified upstream: 2684/2685/2705/2805/2882/28a0/28e1;
+        // verified here: 28e0; the rest are upstream-admitted IDs.
+        0x2684 | 0x2685 | 0x2689  // AD102 4090 / 4090D / 4070TiS
+        | 0x2702 | 0x2704 | 0x2705 | 0x2709  // AD103 4080S/4080/4070TiS/4070
+        | 0x2757  // AD103M 4090 Laptop
+        | 0x2782 | 0x2783 | 0x2786  // AD104 4070Ti/4070S/4070
+        | 0x2803 | 0x2805  // AD106 4060Ti / 4060Ti 16GB
+        | 0x2882 | 0x28a0 | 0x28e0 | 0x28e1  // AD107 4060/4060L/4060M/4050M
+        => "ad102",
+        // GA10x (Ampere): 3090/3080/3070/3060/3050/CPM170HX...
+        0x2204 | 0x2206 | 0x2484..=0x248c | 0x2501 | 0x2503 | 0x2504 | 0x2505
+        | 0x2507 | 0x2508 | 0x2509 | 0x252f | 0x2544 | 0x2560 | 0x2584
+        | 0x20c2 | 0x20f1 => "ga102",
         // Turing: 2060/2070/2080, 1660-lineage, RTX 20-series laptops.
         0x1e02..=0x1fff | 0x2182..=0x2192 => "tu10x",
         other => {

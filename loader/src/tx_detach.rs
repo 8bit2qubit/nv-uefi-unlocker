@@ -120,3 +120,17 @@ pub fn detach_and_claim(pci_handle: Handle) -> Result<alloc::vec::Vec<u32>, &'st
     }
     Ok(baseline)
 }
+
+/// Post-transaction GOP/console reconnect (TOTORONG craft): after the FLR
+/// returned the card to a cold state, recursively ConnectController so the
+/// firmware re-binds the vendor GOP/driver stack. Non-fatal: bootmgfw
+/// self-establishes its own console when it starts; this only restores the
+/// display earlier for machines where the dGPU is the primary adapter.
+pub fn reconnect_all(pci_handle: uefi::Handle) {
+    // Give the FLR-rebooted function a moment, then recursive-connect.
+    boot::stall(core::time::Duration::from_millis(200));
+    match boot::connect_controller(pci_handle, &[], None, true) {
+        Ok(()) => info!("RECONNECT: ConnectController recursive ok"),
+        Err(e) => info!("RECONNECT: ConnectController failed: {:?} (bootmgfw will self-establish)", e.status()),
+    }
+}

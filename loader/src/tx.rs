@@ -922,6 +922,11 @@ pub fn run_transaction(gpu: &TxGpu, assets: &TxAssets, pci_handle: uefi::Handle)
     tb::flr_phase(gpu, payload_mode)?;
     info!("POST-FLR: verified (selectors survive AON)");
 
+    // Restore the display path before handing off (TOTORONG craft): the
+    // FLR-rebooted function re-binds its vendor GOP/driver stack. Non-fatal
+    // - bootmgfw self-establishes a console regardless.
+    crate::tx_detach::reconnect_all(pci_handle);
+
     // Unwind: release every DMA buffer.
     let _ = booter_dma.release(gpu.pci);
     let _ = sig_dma.release(gpu.pci);
