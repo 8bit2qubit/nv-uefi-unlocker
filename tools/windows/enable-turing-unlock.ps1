@@ -1,4 +1,4 @@
-# enable-turing-unlock.ps1 — pre-boot registry companion for the
+﻿# enable-turing-unlock.ps1 — pre-boot registry companion for the
 # nv-uefi-unlocker Turing (TU10x) track.
 #
 # The Windows Turing driver only accepts a pre-OS FEAT unlock
@@ -23,12 +23,12 @@ $Class = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-
 
 # Turing PCI device-id ranges (adapter family we ship tu10x assets for):
 # 0x1E02..0x1FFF (TU102/TU104/TU106/TU116, incl. 16-series) and
-# 0x2182..0x2192 (mobile TU117 etc.).
+# 0x2182..0x21D1 (TU116/TU117 desktop+mobile: 1650 SUPER 2187, 1630, 1650 Mobile).
 function Test-TuringDevId([string]$MatchingDeviceId) {
     if ($MatchingDeviceId -notmatch '(?i)ven_10de&dev_([0-9a-f]{4})') { return $false }
     $dev = [Convert]::ToInt32($Matches[1], 16)
     return (($dev -ge 0x1E02 -and $dev -le 0x1FFF) -or
-            ($dev -ge 0x2182 -and $dev -le 0x2192))
+            ($dev -ge 0x2182 -and $dev -le 0x21D1))
 }
 
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()

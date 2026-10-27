@@ -357,6 +357,17 @@ family proven on the kmod side, our EFI path is structurally identical —
 expected compatible); 🟡 path exists, unverified (code ready, no silicon
 evidence); ❌ incompatible.
 
+**Since 2026-10-28 the routing is open across the full NVIDIA driver
+list** for the three transaction families (open-gpu-kernel-modules README
+"Compatible GPUs", 217 IDs): `0x1e02..=0x1fff` and `0x2182..=0x21d1`
+(Turing); `0x2200..=0x22ff` and `0x2400..=0x25ff` (Ampere; 0x23xx =
+Hopper, deliberately absent); `0x2600..=0x28ff` (Ada). Any same-family
+ID (mobile / workstation / CMP / modded-card) runs without a per-ID
+table entry; unlisted IDs inherit the evidence tier of their family row.
+**GA100 (A100 `0x20b0`/`0x20c2`, A30 `0x20f1`) is not GA10x and has been
+removed from the ga102 routing** (a latent cross-family mismatch);
+Blackwell (0x2bxx+) is out of scope.
+
 | Family | Cards (device IDs) | Tier |
 | --- | --- | --- |
 | AD107 | 4060 Laptop **28e0** | ✅ verified (this report) |
@@ -367,9 +378,9 @@ evidence); ❌ incompatible.
 | AD104 | 4070Ti 2782 / 4070S 2783 / 4070 2786 | 🟢 upstream silicon-verified |
 | AD103 | 4080S 2702 / 4080 2704 / 4070TiS 2705 / **4070 2709** / 4090M 2757 | **2709 ✅ verified** ([issue #8](https://github.com/physicsdolphin/nv-uefi-unlocker/issues/8), B760 desktop dGPU-only: full four-write chain read back, selectors surviving FLR; OS-side sm_89 mma microbenchmark FP16 ~61→**123.91**, BF16 **118.90**, FP8 **243.55** TFLOPS — all **2.0×**); the rest 🟢 upstream silicon-verified |
 | AD102 | 4090 2684 / 4090D 2685 / 4070TiS 2689 | 🟢 upstream silicon-verified |
-| GA10x | 3090/3080 2204/2206, 3070s 2484–248c, 3060s 2501/2503–2509/252f/2544, 3050 2584, 2560, 20c2/20f1 | 🟡 kmod-verified upstream; our EFI path has no silicon evidence |
+| GA10x | 3090/3080 2204/2206, 3070s 2484–248c, 3060s 2501–2584 etc. (0x22xx/0x24xx/0x25xx fully open since 2026-10-28; the former 20c2/20f1 are GA100-class and have been removed) | 🟡 kmod-verified upstream; our EFI path has no silicon evidence |
 | **TU106** | **RTX 2070 1f07** | ✅ verified (2026-10-27, v0.2.0): full chain (FWSEC ignite → BOOT_DIRECT booter → V67 fire → PLM 0x409650 fully open → SS0/SS1 written+read back → signature restore); **FP32-accum 36 → 60-63 TFLOPS (+67-75%)**. **Prerequisite: Windows-side GSP firmware mode (section below), RESTART to apply**. Measured host: Intel 10980HK ES (QTJ1) + 2070 hybrid-output desktop platform; **hibernate-resume → stick unlock write → Windows verification passed** |
-| TU102/TU104/TU116 (rest of the 20/16 series) | 1e02–1e0f, 2182–2192 etc. | 🟢 same-family assets + community silicon proof (2080Ti 22G chenxluo +51-75%, 2080Ti 11G nlzy/haohervchb ~1.6×, same chain) |
+| TU102/TU104/TU116 (rest of the 20/16 series) | 1e02–1fff, 2182–21d1 etc. | 🟢 same-family assets + community silicon proof (2080Ti 22G chenxluo +51-75%, 2080Ti 11G nlzy/haohervchb ~1.6×, same chain) |
 | Turing and older (Pascal…) | — | ❌ no transaction track |
 | Blackwell (50 series) / GA100 | — | ❌ different chain, out of scope |
 
@@ -389,7 +400,7 @@ tools\windows\enable-turing-unlock.ps1 -Remove   # back to stock
 The script enumerates `MatchingDeviceId` under
 `HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-...}\` and writes
 `EnableGpuFirmware=1` only for the Turing device-ID ranges (VEN_10DE,
-0x1E02–0x1FFF and 0x2182–0x2192).
+0x1E02–0x1FFF and 0x2182–0x21D1).
 
 **A Restart is required for it to take effect; do not rely on hibernate
 resume**: resuming from hibernation restores the driver from the

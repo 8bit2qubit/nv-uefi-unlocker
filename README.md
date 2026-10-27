@@ -271,6 +271,16 @@ claim(断 GOP/驱动+独占) → scrubber(BSI handoff 1→3) → FWSEC-FRTS(WPR2
 本 EFI 路径同构，预期兼容）；🟡 路径存在未验证（代码就绪，无硅证据）；
 ❌ 不兼容。
 
+**2026-10-28 起路由全量放开**：Turing / Ampere（GA10x）/ Ada 三族按 NVIDIA
+官方驱动列表（open-gpu-kernel-modules README "Compatible GPUs"，217 ID）**全段
+放行**——`0x1e02..=0x1fff`、`0x2182..=0x21d1`（Turing，1650 SUPER `2187`、
+1630/1650 移动版均在段内）；
+`0x2200..=0x22ff`、`0x2400..=0x25ff`（Ampere；0x23xx=Hopper 不在列）；
+`0x2600..=0x28ff`（Ada）。同族任何 ID（移动/工作站/CMP/魔改卡）不再需要逐个
+加表；未列 ID 按所属家族行继承证据层级。**GA100（A100 `0x20b0`/`0x20c2`、
+A30 `0x20f1`）不属于 GA10x，已从 ga102 路由剔除**（此前为跨族错配隐患）；
+Blackwell（0x2bxx+）不在范围。
+
 | 家族 | 卡（device ID） | 层级 |
 | --- | --- | --- |
 | AD107 | 4060 Laptop **28e0** | ✅ 实测（本报告） |
@@ -281,9 +291,9 @@ claim(断 GOP/驱动+独占) → scrubber(BSI handoff 1→3) → FWSEC-FRTS(WPR2
 | AD104 | 4070Ti 2782 / 4070S 2783 / 4070 2786 | 🟢 上游硅验证 |
 | AD103 | 4080S 2702 / 4080 2704 / 4070TiS 2705 / **4070 2709** / 4090M 2757 | **2709 ✅ 实测**（[issue #8](https://github.com/physicsdolphin/nv-uefi-unlocker/issues/8)，B760 台式独显直连：四写全链读回、选择器穿 FLR；OS 侧 sm_89 mma 微基准 FP16 ~61→**123.91**、BF16 **118.90**、FP8 **243.55** TFLOPS，均 **2.0×**）；其余 🟢 上游硅验证 |
 | AD102 | 4090 2684 / 4090D 2685 / 4070TiS 2689 | 🟢 上游硅验证 |
-| GA10x | 3090/3080 2204/2206、3070 系 2484–248c、3060 系 2501/2503–2509/252f/2544、3050 2584、2560、20c2/20f1 | 🟡 上游 kmod 验证，本 EFI 路径无硅证据 |
+| GA10x | 3090/3080 2204/2206、3070 系 2484–248c、3060 系 2501–2584 等（0x22xx/0x24xx/0x25xx 全段放行；原 20c2/20f1 系 GA100 类已剔除） | 🟡 上游 kmod 验证，本 EFI 路径无硅证据 |
 | **TU106** | **RTX 2070 1f07** | ✅ 实测（2026-10-27，v0.2.0）：全链通过（FWSEC 点火 → BOOT_DIRECT booter → V67 起爆 → PLM 0x409650 全开 → SS0/SS1 写入读回 → 签名还原）；**FP32 累加 36 → 60–63 TFLOPS（+67~75%）**。**前置：Windows 侧 GSP 固件模式（见下节），必须重启生效**。实测机：Intel 10980HK ES（QTJ1）+ 2070 混合输出台式平台；**休眠恢复后进 U 盘写入解锁 → Windows 验证通过** |
-| TU102/TU104/TU116（20 系其余/16 系） | 1e02–1e0f、2182–2192 等 | 🟢 同族资产+社区硅验证（2080Ti 22G chenxluo +51~75%、2080Ti 11G nlzy/haohervchb ~1.6×，同链同构） |
+| TU102/TU104/TU116（20 系其余/16 系） | 1e02–1fff、2182–21d1 等 | 🟢 同族资产+社区硅验证（2080Ti 22G chenxluo +51~75%、2080Ti 11G nlzy/haohervchb ~1.6×，同链同构） |
 | Turing 及更早（Pascal…） | — | ❌ 无事务轨 |
 | Blackwell (50 系) / GA100 | — | ❌ 链路不同，不在范围 |
 
@@ -300,8 +310,8 @@ tools\windows\enable-turing-unlock.ps1 -Remove   # 回滚到 stock
 ```
 
 脚本枚举 `HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-...}\` 下的
-`MatchingDeviceId`，只对 Turing 设备 ID 段（VEN_10DE，0x1E02–0x1FFF 与
-0x2182–0x2192）写 `EnableGpuFirmware=1`。
+`MatchingDeviceId`，只对 Turing 设备 ID 段（VEN_10DE，0x1E02–0x1FFF、
+0x2182–0x21D1）写 `EnableGpuFirmware=1`。
 
 **必须 Restart（重启）生效，不要依赖休眠恢复**：休眠恢复从休眠镜像还原驱动、
 不重新初始化——GSP 模式不生效，而旧驱动会话遇到解锁态会 TDR。流程：运行

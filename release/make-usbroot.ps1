@@ -1,4 +1,4 @@
-# make-usbroot.ps1 - regenerate the unlock USB stick root from pinned public
+﻿# make-usbroot.ps1 - regenerate the unlock USB stick root from pinned public
 # inputs. NVIDIA firmware blobs are NOT distributed with this project; this
 # script downloads the pinned public packages, verifies their SHA-256, and
 # regenerates every file the EFI application needs for the chosen GPU family.
@@ -84,7 +84,7 @@ function Test-TuringDevId([string]$MatchingDeviceId) {
     if ($MatchingDeviceId -notmatch '(?i)ven_10de&dev_([0-9a-f]{4})') { return $false }
     $dev = [Convert]::ToInt32($Matches[1], 16)
     return (($dev -ge 0x1E02 -and $dev -le 0x1FFF) -or
-            ($dev -ge 0x2182 -and $dev -le 0x2192))
+            ($dev -ge 0x2182 -and $dev -le 0x21D1))
 }
 
 function Get-TuringAdapterState {

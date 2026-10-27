@@ -146,31 +146,34 @@ fn tx_one_card(g: &pci::FoundGpu) {
     // Per-family asset selection by PCI device ID (constitution 5: no
     // cross-family payloads — a GA102 payload on AD102 HALTs and opens
     // nothing). Names on the boot volume: <asset>_<family>.bin.
+    //
+    // 2026-10-28: the whitelist is OPEN for the full NVIDIA driver list
+    // of the three transaction families (pinned open-gpu-kernel-modules
+    // README "Compatible GPUs" table, 217 IDs, cross-checked against
+    // upstream's supported_ids[]). The blocks are die-family-pure:
+    //   0x1e02..0x1fff, 0x2182..0x21d1 = Turing
+    //     TU102/104/106/116/117 (20/16-series, TITAN/Quadro RTX,
+    //     CMP 30/40/50HX; the 21xx span covers every TU116 SKU incl.
+    //     1650 SUPER 2187 and the odd 21c2 variant);
+    //   0x2200..0x22ff, 0x2400..0x25ff = Ampere GA10x (GA102 3090/3080/
+    //     CMP 90HX/A6000-class, GA103 2414, GA104 3070s/CMP 70HX/A4500,
+    //     GA106/107 3060/3050 lines + mobile; 0x23xx = Hopper, absent
+    //     on purpose);
+    //   0x2600..0x28ff = Ada AD10x (GeForce 40-series desktop+mobile,
+    //     RTX-workstation/L-class, the AD106M "RTX 3050 A", and
+    //     upstream-unlisted IDs such as the 4070M modded-card 2820).
+    //   0x2bxx+ = Blackwell, out of scope. GA100 (0x20b0 A100, 0x20c2,
+    //     0x20f1 A30 per cmp170hx p2p inventory) is NOT GA10x and stays
+    //     outside the Ampere ranges - the 20c2/20f1 arms that previously
+    //     routed to ga102 were a cross-family hazard and are removed.
+    // Unverified IDs now run instead of being refused: per-ID evidence
+    // tiers live in the README matrix, and a first-silicon report
+    // upgrades the row (issue #8 process).
     let dev = g.device_id;
     let family: &str = match dev {
-        // AD10x (Ada): the full upstream ad102_family() routing table -
-        // every listed ID uses the same pinned AD102 booter/payload.
-        // Silicon-verified upstream: 2684/2685/2705/2805/2882/28a0/28e1;
-        // verified here: 28e0; the rest are upstream-admitted IDs. 28a1 is
-        // NVIDIA's other 4050 Laptop ID (same AD107M die as verified-silicon
-        // 28e1, same 28xx block) but missing from upstream's table.
-        // 2820 is the AD106M 4070 Laptop (also upstream-absent); the same
-        // family assets as the verified 2803 desktop AD106 apply.
-        // TODO(28a1,2820): first-silicon run should re-verify checklist
-        // evidence.
-        0x2684 | 0x2685 | 0x2689  // AD102 4090 / 4090D / 4070TiS
-        | 0x2702 | 0x2704 | 0x2705 | 0x2709  // AD103 4080S/4080/4070TiS/4070
-        | 0x2757  // AD103M 4090 Laptop
-        | 0x2782 | 0x2783 | 0x2786  // AD104 4070Ti/4070S/4070
-        | 0x2803 | 0x2805 | 0x2820  // AD106 4060Ti / 4060Ti 16GB / 4070M
-        | 0x2882 | 0x28a0 | 0x28a1 | 0x28e0 | 0x28e1  // AD107 4060/4060L/4050L/4060M/4050M
-        => "ad102",
-        // GA10x (Ampere): 3090/3080/3070/3060/3050/CPM170HX...
-        0x2204 | 0x2206 | 0x2484..=0x248c | 0x2501 | 0x2503 | 0x2504 | 0x2505
-        | 0x2507 | 0x2508 | 0x2509 | 0x252f | 0x2544 | 0x2560 | 0x2584
-        | 0x20c2 | 0x20f1 => "ga102",
-        // Turing: 2060/2070/2080, 1660-lineage, RTX 20-series laptops.
-        0x1e02..=0x1fff | 0x2182..=0x2192 => "tu10x",
+        0x2600..=0x28ff => "ad102",
+        0x2200..=0x22ff | 0x2400..=0x25ff => "ga102",
+        0x1e02..=0x1fff | 0x2182..=0x21d1 => "tu10x",
         other => {
             info!("TX: device 10de:{other:04x} has no asset family mapping - skipping");
             return;
