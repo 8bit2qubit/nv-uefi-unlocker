@@ -247,6 +247,11 @@ TU106 出厂钳制实测：SS0 冷值非默认（0x15000/0x11000/0x0 引导间
 图和 GSP ELF 的前 0x6000（`c76c43b1...`）都不是它；maker 对源归档与输出
 双层校验，长度或 hash 不符即硬失败。
 
+**Turing 2070 解锁后，解锁前忘记截图了，大家有相同卡的可以自己跑一下对比见真知**
+
+<img width="800" height="450" alt="image" src="https://github.com/user-attachments/assets/8c103363-8e44-4d46-ab47-a6c063ae1e6f" />
+
+
 **不兼容/异常时**：请提交 U 盘根的 `\loader.log` 全文到
 [Issues](https://github.com/physicsdolphin/nv-uefi-unlocker/issues)（日志含
 完整阶段轨迹，是我们诊断的唯一依据；发前可脱敏机器信息）。也可以在
