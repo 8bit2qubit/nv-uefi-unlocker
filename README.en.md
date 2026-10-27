@@ -109,8 +109,11 @@ spot by the maker from the pinned SHA-256 public inputs above:
 Linux/WSL/Git Bash equivalent: `./make-usbroot.sh`, with the same options
 as the PowerShell script (`--family/--out/--work/--assets/--boot-efi/
 --proven-blob/--skip-gsp-check`). The release package contains the Linux
-pipeline binary `assets-x86_64-linux`, which the script prefers; inside a
-repo checkout without it the script falls back to an automatic
+pipeline binary `assets-x86_64-linux` (glibc >= 2.34, Ubuntu 22.04+ /
+Debian 12+ and newer), which the script prefers and chmod +x's on the fly
+(zips carry no Unix exec bits — run the script itself via
+`bash make-usbroot.sh` or chmod it first); inside a repo checkout without
+it the script falls back to an automatic
 `cargo build -p assets` (Rust toolchain needed once). The tu10x GSP gate on
 Linux reads the nvidia-smi runtime state (the proprietary driver 545+ runs
 GSP-RM by default on Turing and newer — no EnableGpuFirmware-style switch

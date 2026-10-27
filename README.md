@@ -83,8 +83,10 @@ release 包只发脚本与自产二进制（`BOOTX64.EFI`、`assets-x86_64-windo
 
 Linux/WSL/Git Bash 等价：`./make-usbroot.sh`，参数与 PS1 一一对应
 （`--family/--out/--work/--assets/--boot-efi/--proven-blob/--skip-gsp-check`）。
-release 包内含 Linux 版管线 `assets-x86_64-linux`，脚本优先取用；仓库检出里
-找不到该文件时自动 `cargo build -p assets` 兜底（需 Rust 工具链）。tu10x 的
+release 包内含 Linux 版管线 `assets-x86_64-linux`（glibc ≥ 2.34，Ubuntu
+22.04+/Debian 12+ 均满足），脚本优先取用并自动补执行位（zip 不带 Unix 权限位，
+脚本本身用 `bash make-usbroot.sh` 运行或先 `chmod +x`）；仓库检出里找不到该
+文件时自动 `cargo build -p assets` 兜底（需 Rust 工具链）。tu10x 的
 GSP 门在 Linux 端读 nvidia-smi 运行态（Linux 专有驱动 545+ 对 Turing 及之后
 架构缺省运行 GSP-RM，无需 EnableGpuFirmware 类开关；门拦的是"驱动过旧"与
 "被 modprobe 配置强关 GSP"两种 legacy 态），并会探测本机 RTD3 给出 issue #9 提示。
