@@ -230,6 +230,39 @@ blacks out nothing — it quietly wipes the unlock. The Linux maker
 (`make-usbroot.sh`) probes the host's RTD3 state while building the stick
 and prints a notice.
 
+## Thunderbolt / hot-plug root port eGPU: a volatile-unlock-hostile environment (known limitation)
+
+User report (2026-10-28): with a Thunderbolt dock, the eGPU unlock ran
+green end to end in EFI, but the unlock was gone after entering Windows.
+Mechanically this is an environment issue, not a transaction issue:
+
+- the EFI unlock works because firmware established the PCIe tunnel at
+  POST, so the eGPU is visible to DXE;
+- entering Windows, the TB connection manager (the firmware ICM / the
+  Windows TB stack's approval and tunnel re-establishment) can **tear down
+  and re-establish the tunnel** — to the eGPU that is equivalent to a hot
+  reset / PERST#; dock power management (TB controller D3cold, S0ix,
+  enclosure power policies) may cut power outright. The unlock is a
+  volatile overlay: any conventional reset (hot reset/SBR, PERST#) or
+  power loss erases it — same family as issue #9's RTD3/D3cold.
+
+Reference: cmp170hx measured Thunderbolt 3 eGPUs failing the kmod unlock
+itself (`Booter Load 0x15`); Oculink works (it is an extension cable in
+essence). **The supported environment is native PCIe slots / dGPU-direct
+laptops.** TB / hot-plug-root-port users: treat "no gain after entering
+the OS" as expected behavior — no need to file an issue.
+
+One PCIe-semantics clarification worth keeping: **a pure link retrain
+(Retrain Link / a TLS change / the LTSSM re-run triggered by ASPM config)
+does not reset the endpoint** — device registers and config space are
+preserved and the unlock is untouched. What erases the unlock is the
+conventional-reset family (hot reset/SBR, PERST#, the FLR re-lock on
+Turing) and power loss (D3cold/S3). The kernel does not retrain links
+gratuitously during a normal boot; the real x86 "kernel touches the link"
+scenarios are AER/DPC error recovery (only after errors — exactly what the
+Turing GSP-mode gate cuts off at the source) and hot-plug re-scan — the
+latter being this section's Thunderbolt case.
+
 ## Combining with the nvoc kmd power-wall unlock
 
 This tool is **compatible and orthogonal** with the kmd power-wall unlock

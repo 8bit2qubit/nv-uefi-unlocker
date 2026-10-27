@@ -175,6 +175,30 @@ Ubuntu 及衍生版在受支持的笔记本上缺省启用 RTD3（发行版文�
 一种——不报错、不黑屏，只是安静地把解锁擦掉。Linux 版 maker
 （`make-usbroot.sh`）构建 U 盘时会探测本机 RTD3 状态并给出提示。
 
+## 雷电（Thunderbolt）/ 热插拔根口 eGPU：解锁易失环境（已知限制）
+
+2026-10-28 用户反馈：雷电拓展坞下 eGPU 在 EFI 阶段全链解锁成功（读回全绿），
+进入 Windows 后解锁丢失。机理上这是环境问题而不是事务问题：
+
+- EFI 阶段能解锁，是因为固件在 POST 时已建好 PCIe 隧道，eGPU 对 DXE 可见；
+- 进入 Windows 后，TB 连接管理器（固件 ICM / Windows TB 栈的审批与隧道重建）
+  可能**拆除并重建隧道**，对 eGPU 等价于一次 hot reset / PERST#；坞内供电管理
+  （TB 控制器 D3cold、S0ix、enclosure 供电策略）还可能直接断电。解锁是易失
+  覆盖，任何 conventional reset（hot reset/SBR、PERST#）或失电都会把它擦掉
+  ——与 issue #9 的 RTD3/D3cold 同属一族。
+
+参考系：cmp170hx 实测 Thunderbolt 3 eGPU 连 kmod 解锁本体都失败
+（`Booter Load 0x15`）；Oculink 可用（本质是延长线）。**受支持环境以原生
+PCIe 插槽 / 独显直连为准**；雷电/热插拔根口用户请把"解锁后进 OS 无提升"
+视为预期行为，不必提 issue。
+
+顺带澄清一个常见混淆（PCIe 语义）：**纯链路重训（Retrain Link / TLS 变更 /
+ASPM 配置触发的 LTSSM 重跑）不复位 endpoint**——设备寄存器与配置空间全部
+保留，解锁不受影响。会丢解锁的是 conventional reset 家族（hot reset/SBR、
+PERST#、Turing 上的 FLR 重锁）与失电（D3cold/S3）。内核正常引导不会无故
+重训；x86 上内核"动链路"的真实场景是 AER/DPC 错误恢复（先出错才有，Turing
+GSP 门前置掐断的就是这条触发源）与热插拔重扫——后者就是本节的雷电场景。
+
 ## 与 nvoc kmd 功耗墙解锁配合使用
 
 本工具与[本人](https://github.com/physicsdolphin)主导开发的 **[Skyworks-Neo/nvoc](https://github.com/Skyworks-Neo/nvoc)** 的 kmd
