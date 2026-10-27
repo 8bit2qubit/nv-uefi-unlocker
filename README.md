@@ -104,7 +104,7 @@ cmp50hx 仓库下载；离线时用 `-ProvenBlob <path>` 指本地文件。
 
 本工具与[本人](https://github.com/physicsdolphin)主导开发的 **[Skyworks-Neo/nvoc](https://github.com/Skyworks-Neo/nvoc)** 的 kmd
 功耗墙解锁**兼容且正交**：本工具在 UEFI 预驱动窗口解除 tensor 发射速率钳制
-（FEAT/WPR/WPRCFG PLM），nvoc kmd 在操作系统内解除功耗墙（目前适用移动端 GPU），nvoc set-volt-rail-limit 解除 slot 0,1,2 的Target Wall，Vbios Wall，VRM Max Wall(Vop)电压墙（适用于所有10系后GPU） ——两者作用于
+（FEAT/WPR/WPRCFG PLM），nvoc kmd 在操作系统内解除功耗墙（目前适用移动端 GPU 和 10系/20系桌面端 GPU（但未测试效果，我手上的这类卡全都shuntmodded改成“0W”了）），nvoc set-volt-rail-limit 解除 slot 0,1,2 的Target Wall，Vbios Wall，VRM Max Wall(Vop)电压墙（适用于所有10系后GPU） ——两者作用于
 不同层级（驱动“下面”+驱动“上面”），可叠加，推荐配合使用以获得极限性能。
 
 <img width="1280" height="595" alt="image" src="https://github.com/user-attachments/assets/1f60b619-b367-4823-9764-1caa44575501" />
