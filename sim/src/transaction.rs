@@ -2,7 +2,8 @@
 //! structure, at the abstraction level of our EFI loader's M3 design):
 //!
 //! claim → gfw_wait → fwsec → wpr2_verify → booter_fire → execution_verify
-//! (marker + HALT + PLM) → selectors → flr → post_flr_verify → unwind
+//! (payload shape: Ada marker+HALT+PLM triad, or GA102 wait_plm flip) →
+//! selectors → flr → post_flr_verify → unwind
 //!
 //! Every fault path must unwind completely: DMA freed, BME restored,
 //! nothing left held. The read-back is the only success criterion.
@@ -25,6 +26,12 @@ pub struct Faults {
     pub marker_missing: bool,
     /// SEC2 never HALTs.
     pub halt_not_set: bool,
+    /// GA102 payload: the ROP never ran - the booter executes stock,
+    /// reports its signature error, and HALTs (early-PLM-failed verdict).
+    pub plm_missing: bool,
+    /// GA102 payload: the core spins in the fill loop but the PLM write
+    /// was dropped - wait_plm must time out, never succeed.
+    pub plm_flip_missing: bool,
     /// FWSEC installs a WPR2 different from the requested layout.
     pub wpr2_mismatch: bool,
     /// FLR itself fails (EIO analog).
@@ -37,6 +44,18 @@ pub struct Faults {
     pub post_flr_alien_wpr: bool,
     /// Signature restoration into the meta fails to land the stock bytes.
     pub signature_restore_fail: bool,
+}
+
+/// Payload return-path shape (canonical falcon_hs `wait_plm` split).
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PayloadShape {
+    /// Ada four-write chain: marker into mailbox0 + HALT tail (M4-verified
+    /// triad verdict).
+    #[default]
+    AdaTriad,
+    /// GA102 canonical V67: single FEAT PLM write + fill self-loop tail -
+    /// the PLM flip is the verdict; no marker, and no halt will EVER come.
+    Ga102SelfLoop,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -73,6 +92,8 @@ pub struct Transaction<'a> {
     /// false = chain-replay (stock booter, PLM stays locked, no selector
     /// writes, no signature restore).
     pub payload: bool,
+    /// Payload return-path shape (Ada triad vs GA102 self-loop wait_plm).
+    pub shape: PayloadShape,
     // bookkeeping (unwind contract)
     dma_live: usize,
     dma_allocs: usize,
@@ -88,12 +109,22 @@ impl<'a> Transaction<'a> {
             gpu,
             faults,
             payload: true,
+            shape: PayloadShape::AdaTriad,
             dma_live: 0,
             dma_allocs: 0,
             dma_frees: 0,
             bme_set: false,
             bme_was_dirty: false,
             log: Vec::new(),
+        }
+    }
+
+    /// GA102 canonical payload (issue #6): single PLM write + self-loop -
+    /// the wait is the PLM flip, never a halt.
+    pub fn new_ga102_payload(gpu: &'a mut FakeGpu, faults: Faults) -> Self {
+        Self {
+            shape: PayloadShape::Ga102SelfLoop,
+            ..Self::new(gpu, faults)
         }
     }
 
@@ -211,6 +242,18 @@ impl<'a> Transaction<'a> {
         if !self.payload {
             self.gpu.boot_mode = crate::BootMode::Halt;
         }
+        if self.payload && self.shape == PayloadShape::Ga102SelfLoop {
+            // GA102 canonical: pick the fake's return-path behavior from
+            // the fault model before START (lib.rs boot_mode effects).
+            self.gpu.boot_mode = if self.faults.plm_missing {
+                crate::BootMode::Halt // payload missed the stack: stock run
+            } else if self.faults.plm_flip_missing {
+                crate::BootMode::SelfLoopNoFlip
+            } else {
+                crate::BootMode::Ga102SelfLoop
+            };
+        }
+        let plm_entry = self.gpu.read(regs::FEAT_PLM);
         self.gpu.write(regs::SEC2_CPUCTL, 1 << 1); // START = bit 1 (real chip)
         if !self.payload {
             // Replay verdict: the stock booter halts with mailbox0 == 0
@@ -245,6 +288,30 @@ impl<'a> Transaction<'a> {
             }
             self.note("replay verified (mbox0=0 + HALT + WPR2 up, PLM stays locked)");
             return Ok(());
+        }
+        if self.shape == PayloadShape::Ga102SelfLoop {
+            // Canonical wait_plm verdict (unlock_610.c 403-424): vetted
+            // reads; the PLM cold->open transition is success; a HALT
+            // observed before the flip is the FAILURE sign (the signature
+            // DMA missed the stack - a stock run cannot open the PLM).
+            let plm = self.gpu.read(regs::FEAT_PLM);
+            let cpuctl = self.gpu.read(regs::SEC2_CPUCTL);
+            let halted = cpuctl & 0x10 != 0;
+            if plm == 0xffff_ffff && plm_entry != 0xffff_ffff {
+                self.note("GA102 payload verified: PLM flip, no halt expected (fill self-loop tail)");
+                return Ok(());
+            }
+            if halted {
+                // The stock run reports its own signature error before
+                // halting (0x31 = V67 is not a valid RSA signature).
+                self.gpu.force_write(SEC2_MAILBOX0, 0x31);
+                return Err(PhaseError::new("verify", format!(
+                    "early PLM failed: halt before flip (cpuctl={cpuctl:#x} plm={plm:#x} entry={plm_entry:#x}) - signature DMA missed the stack"
+                )));
+            }
+            return Err(PhaseError::new("verify", format!(
+                "ETIMEDOUT: PLM never flipped while SEC2 kept running (cpuctl={cpuctl:#x} plm={plm:#x}) - write dropped"
+            )));
         }
         // Execution evidence: marker into mailbox 0, HALT in CPUCTL, PLM open.
         if !self.faults.marker_missing {
@@ -352,16 +419,25 @@ impl<'a> Transaction<'a> {
             Ok(())
         })();
         let unwound = self.unwind(result);
+        let ga102 = self.shape == PayloadShape::Ga102SelfLoop;
         unwound.map(|_| Report {
             dma_pages_allocated: self.dma_allocs,
             dma_pages_freed: self.dma_frees,
             fwsec_fired: true,
             booter_fired: true,
-            marker_seen: self.payload && !self.faults.marker_missing,
-            halt_seen: !self.faults.halt_not_set,
+            marker_seen: self.payload && !ga102 && !self.faults.marker_missing,
+            // GA102 canonical: no halt will ever come (self-loop tail) -
+            // its absence is the design, not a fault.
+            halt_seen: !ga102 && !self.faults.halt_not_set,
             plm_open_verified: self.payload
-                && !self.faults.marker_missing
-                && !self.faults.halt_not_set,
+                && match self.shape {
+                    PayloadShape::Ga102SelfLoop => {
+                        !self.faults.plm_missing && !self.faults.plm_flip_missing
+                    }
+                    PayloadShape::AdaTriad => {
+                        !self.faults.marker_missing && !self.faults.halt_not_set
+                    }
+                },
             selectors_written: self.payload,
             bme_restored: !self.bme_set,
             flr_done: !self.faults.fail_flr,

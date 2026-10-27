@@ -11,6 +11,7 @@ use alloc::vec;
 use log::info;
 use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams};
 use uefi::proto::console::gop::GraphicsOutput;
+use uefi::proto::device_path::DevicePath;
 use uefi::{Handle, Identify};
 
 use crate::pci::PciIo;
@@ -19,6 +20,31 @@ fn open_count(handle: Handle) -> usize {
     match boot::protocols_per_handle(handle) {
         Ok(per) => per.iter().count(),
         Err(_) => 0,
+    }
+}
+
+/// Raw device-path bytes of a handle (same technique as the chainload
+/// self-volume fingerprint).
+fn device_path_bytes(handle: Handle) -> Option<alloc::vec::Vec<u8>> {
+    let dp = unsafe {
+        boot::open_protocol::<DevicePath>(
+            OpenProtocolParams { handle, agent: boot::image_handle(), controller: None },
+            OpenProtocolAttributes::GetProtocol,
+        )
+    }
+    .ok()?;
+    Some(dp.as_bytes().to_vec())
+}
+
+/// Does this GOP handle belong to the target GPU? The vendor GOP child
+/// handle's device path extends the PCI device path, so a node-aligned
+/// prefix match identifies ownership. A false "no" is safe: the stage-3
+/// recursive disconnect tears the target's own stack regardless - the
+/// check only decides whether we ALSO tear down other cards' GOPs.
+fn gop_belongs_to_target(gop: Handle, pci_handle: Handle) -> bool {
+    match (device_path_bytes(pci_handle), device_path_bytes(gop)) {
+        (Some(p), Some(g)) => g.len() >= p.len() && g[..p.len()] == p[..],
+        _ => false,
     }
 }
 
@@ -76,14 +102,23 @@ pub fn pm_preflight(pci: &PciIo) -> Result<PmEntry, &'static str> {
 pub fn detach_and_claim(pci_handle: Handle) -> Result<alloc::vec::Vec<u32>, &'static str> {
     info!("DETACH: staged console/driver detach begin (TOTORONG craft)");
 
-    // Stage 1+2: disconnect every driver bound to the GOP handle
-    // (ConSplitter TextOut agent + GraphicsConsole; the UEFI disconnect
-    // walks children, TOTORONG splits them only for failure attribution).
+    // Stage 1+2: disconnect every driver bound to the TARGET GPU's GOP
+    // handle (ConSplitter TextOut agent + GraphicsConsole; the UEFI
+    // disconnect walks children, TOTORONG splits them only for failure
+    // attribution). Multi-GPU (2026-10-27): GOPs belonging to OTHER cards
+    // are left untouched - disconnecting them bought nothing, killed the
+    // console when it lived on another GPU, and reconnect_all (target
+    // handle only) never restored them. The stage-3 recursive disconnect
+    // still guarantees the target's own stack comes off.
     let gop_handles =
         boot::locate_handle_buffer(boot::SearchType::ByProtocol(&GraphicsOutput::GUID));
     if let Ok(h) = gop_handles {
         for i in 0..h.len() {
             let gop = h[i];
+            if !gop_belongs_to_target(gop, pci_handle) {
+                info!("DETACH: GOP handle {:?} is not on the target GPU (multi-GPU) - left untouched, its console stays alive", gop);
+                continue;
+            }
             let before = open_count(gop);
             info!("DETACH: stage GOP handle {:?} protocols {}", gop, before);
             let st = boot::disconnect_controller(gop, None, None);

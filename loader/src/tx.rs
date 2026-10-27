@@ -502,7 +502,11 @@ pub fn claim_guards(gpu: &TxGpu, family: &str, post_flr: bool) -> Result<(), TxE
         return Err(TxError::EBusy);
     }
     if hi != 0 {
-        info!("claim: post-FLR WPR2 hi={hi:#x} (self-induced, accepted)");
+        if family == "tu10x" {
+            info!("claim: WPR2 hi={hi:#x} up at entry (Turing mainline: POST/FLR provisioned - accepted)");
+        } else {
+            info!("claim: post-FLR WPR2 hi={hi:#x} (self-induced, accepted)");
+        }
     }
     Ok(())
 }
@@ -695,7 +699,9 @@ pub fn list_root_entries() {
 }
 
 /// Shared PciIo access helper for the pre-transaction FLR experiment.
-fn pre_flr_experiment(handle: uefi::Handle) {
+/// Returns whether an FLR was actually performed (drives the WPR2
+/// cold-state guard in claim_guards - issue #4.2).
+fn pre_flr_experiment(handle: uefi::Handle) -> bool {
     // Opt-in via a flag file on the boot volume. The kernel reference flow
     // (and unlock_610.c) run the scrubber/FWSEC chain WITHOUT any pre-FLR -
     // and our measured post-FLR state (GFW_BOOT stuck 0x101, both chips)
@@ -703,7 +709,7 @@ fn pre_flr_experiment(handle: uefi::Handle) {
     // round tests the kernel-matching sequence.
     if read_boot_file("\\pre-flr-on.txt").is_none() {
         info!("PRE-FLR: disabled (no \\pre-flr-on.txt) - kernel-matching flow");
-        return;
+        return false;
     }
     info!("PRE-FLR experiment: resetting function to clean state");
     use uefi::boot::{OpenProtocolAttributes, OpenProtocolParams};
@@ -720,7 +726,7 @@ fn pre_flr_experiment(handle: uefi::Handle) {
         )
     } {
         Ok(p) => p,
-        Err(_) => { info!("PRE-FLR: cannot open PciIo"); return; }
+        Err(_) => { info!("PRE-FLR: cannot open PciIo"); return false; }
     };
     flr_once(&mut scoped);
 
@@ -742,6 +748,7 @@ fn pre_flr_experiment(handle: uefi::Handle) {
     }
     let bsi = scoped.bar_read_u32(0, 0x0011_80fc);
     info!("PRE-FLR: post-settle BSI_SCRATCH15={bsi:#010x} (handoff={})", bsi >> 29 & 7);
+    true
 }
 
 /// Formatted variant: substitutes `{}` with `family` then reads.
@@ -820,6 +827,35 @@ pub struct TxAssets {
     pub bl: Option<alloc::vec::Vec<u8>>,
 }
 
+/// Asset size validation BEFORE any GPU interaction (issue #4.3): the DMA
+/// copies use fixed windows (V67_SIZE into sig_dma, 4096-byte stock_dma),
+/// so a damaged stick must be refused here, not over/under-copied on the
+/// device. Runs before pm_preflight/detach - a validation failure means
+/// nothing was touched and there is nothing to unwind.
+pub fn validate_asset_sizes(assets: &TxAssets) -> Result<(), TxError> {
+    use crate::tx_booter as tb;
+    if let Some(v67) = &assets.v67 {
+        if v67.len() != tb::V67_SIZE {
+            info!(
+                "TX: \\v67-{}-four-plm.bin is {} bytes, want exactly {} (0xfa00) - refusing to run (truncated or damaged stick?)",
+                assets.family,
+                v67.len(),
+                tb::V67_SIZE
+            );
+            return Err(TxError::EInval);
+        }
+    }
+    if assets.stock_sig.is_empty() || assets.stock_sig.len() > 4096 {
+        info!(
+            "TX: fwsignature_{}.bin is {} bytes, want 1..=4096 (the stock_dma window) - refusing to run (damaged stick?)",
+            assets.family,
+            assets.stock_sig.len()
+        );
+        return Err(TxError::EInval);
+    }
+    Ok(())
+}
+
 /// Transaction, phases mirror sim::transaction and the C reference:
 /// guards -> gfw -> layout -> FWSEC ignition (WPR2) -> [booter fire ->
 /// triad -> selectors -> signature restore -> FLR + post-FLR].
@@ -859,9 +895,16 @@ pub fn run_transaction(gpu: &TxGpu, assets: &TxAssets, pci_handle: uefi::Handle)
     // function reset. The FLR triggers the GPU's own re-boot (GFW restarts,
     // WPR2 re-provisioned) - pre_flr_experiment waits for that boot to
     // settle and re-reads the BSI handoff.
-    pre_flr_experiment(pci_handle);
+    let pre_flr_did_flr = pre_flr_experiment(pci_handle);
 
-    claim_guards(gpu, assets.family, assets.family == "tu10x")?;
+    // WPR2 cold-state guard (issue #4.2): only a pre-FLR WE performed makes
+    // an up WPR2 "self-induced" - without the marker the canonical -EBUSY
+    // applies (a driver already used the card this power cycle; power off
+    // first). Turing keeps the unconditional accept: WPR2-up is the
+    // MAINLINE entry there (POST/FLR-reboot provisioned; the FWSEC-fire
+    // skip below depends on it).
+    let post_flr = pre_flr_did_flr || assets.family == "tu10x";
+    claim_guards(gpu, assets.family, post_flr)?;
 
     // Differential authority map while both engines sit in the as-booted
     // state: localizes the SEC2 start-authority gate before any reset.
@@ -1077,7 +1120,18 @@ pub fn run_transaction(gpu: &TxGpu, assets: &TxAssets, pci_handle: uefi::Handle)
     if assets.family == "tu10x" {
         tb::booter_fire_direct(gpu, &hdr, booter_view, meta_addr)?;
     } else {
-        tb::booter_fire(gpu, &hdr, booter_view, meta_addr, vram_fb)?;
+        // Canonical wait split (unlock_610.c falcon_hs): the GA102 V67's
+        // tail is the fill self-loop - the booter never halts and writes no
+        // marker, so payload mode there waits on the PLM flip (HALT during
+        // the wait = failure). Ada payload halts with its marker (M4);
+        // replay always halts. Issue #6: the GA106M run flipped the PLM but
+        // died on this poll when it waited for HALT unconditionally.
+        let wait = if payload_mode && assets.family == "ga102" {
+            tb::BooterWait::PlmFlip
+        } else {
+            tb::BooterWait::Halt
+        };
+        tb::booter_fire(gpu, &hdr, booter_view, meta_addr, vram_fb, wait)?;
     }
     if meta_addr != meta_dma.dev {
         let lo = gpu.pci.bar_read_u32(1, meta_addr);
@@ -1090,9 +1144,17 @@ pub fn run_transaction(gpu: &TxGpu, assets: &TxAssets, pci_handle: uefi::Handle)
     let booter_ok = if assets.family == "tu10x" {
         tb::verify_execution_tu10x(gpu, payload_mode, meta_view).is_ok()
     } else {
-        tb::verify_execution(gpu, payload_mode, meta_view).is_ok()
+        tb::verify_execution(gpu, assets.family, payload_mode, meta_view).is_ok()
     };
     if !booter_ok && !force_continue {
+        // Canonical failure-path invariant (unlock_610.c restores the stock
+        // signature before the unwind; -EPROTO otherwise): never leave a
+        // V67-published meta page behind. Host-memory hygiene - the FLR in
+        // the main.rs unwind kills the only consumer - but keep the shape.
+        let meta = unsafe { core::slice::from_raw_parts_mut(meta_dma.host, tb::WPR_META_SIZE) };
+        tb::signature_restore(meta, stock_dma.dev, assets.stock_sig.len() as u64);
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        info!("TX: stock signature restored (failure-path unwind)");
         return Err(TxError::EIO);
     }
     if booter_ok {

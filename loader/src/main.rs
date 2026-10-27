@@ -35,35 +35,38 @@ fn main() -> Status {
     logging::init(VERSION);
     banner::print(VERSION);
 
-    // Phase: CONFIRM. Any key proceeds early; timeout proceeds anyway.
-    // (M0 is read-only. From M3 on, timeout must mean ABORT into chain-load.)
-    match keywait::wait_any_key_or_timeout(30) {
-        keywait::KeyOrTimeout::Key(k) => info!("CONFIRM: key {:?} pressed, proceeding", k),
-        keywait::KeyOrTimeout::Timeout => {
-            info!("CONFIRM: 30s timeout, proceeding (M0 read-only default)")
-        }
-    }
+    // Phase: CONFIRM. TX builds: ONLY Space proceeds - timeout or any other
+    // key aborts into chain-load with zero GPU writes (issue #4.1: the old
+    // code proceeded on any key AND on timeout, so a stick left in a machine
+    // could run the transaction unattended). Read-only builds keep the M0
+    // semantics.
+    let confirmed = keywait::wait_confirm(30);
 
-    // Phase: ENUMERATE (read-only).
-    let gpu = pci::enumerate();
+    // Phase: ENUMERATE (read-only). ALL NVIDIA display adapters, in
+    // firmware enumeration order.
+    let gpus = pci::enumerate();
 
     // Phase: GOP-PROBE (read-only; which console driver owns which GPU).
     gop::enumerate_gop();
 
-    // Phase: SAMPLE (M1: read-only cold-state register sweep).
-    match &gpu {
-        Some(gpu) => sample::run(gpu),
-        None => info!("SAMPLE: no NVIDIA GPU present, skipped (negative control path)"),
+    // Phase: SAMPLE (M1: read-only cold-state register sweep, first card).
+    if let Some(gpu) = gpus.first() {
+        sample::run(gpu);
+    } else {
+        info!("SAMPLE: no NVIDIA GPU present, skipped (negative control path)");
     }
 
     // Phase: TX (feature-gated transaction; only in explicit tx builds).
-    // NOTE: inside tx_phase the console drivers are detached (TOTORONG
-    // craft) - the screen goes dark from that point until Windows boots.
-    // The log file keeps recording and is the evidence record.
+    // NOTE: inside tx_phase each card's console drivers are detached
+    // (TOTORONG craft) - the screen goes dark from that card's transaction
+    // until Windows boots. The log file keeps recording and is the
+    // evidence record. Multi-GPU: every supported card runs in order.
     #[cfg(feature = "tx")]
-    if let Some(gpu_handle) = &gpu {
-        tx_phase(gpu_handle.handle);
+    if let keywait::Confirm::Proceed = confirmed {
+        tx_phase(&gpus);
     }
+    #[cfg(not(feature = "tx"))]
+    let _ = confirmed;
 
     // Phase: CHAIN. Read-only LoadImage/StartImage of the ESP bootmgfw.efi.
     // The verdict lines above are in \loader.log; no pause before handing
@@ -80,11 +83,38 @@ fn main() -> Status {
 
 
 #[cfg(feature = "tx")]
-fn tx_phase(handle: uefi::Handle) {
+fn tx_phase(gpus: &[pci::FoundGpu]) {
+    let targets = pci::select_tx_targets(gpus);
+    if targets.is_empty() {
+        info!("TX: no transaction target (selection marker refused, or no supported GPU) - chain-loading unchanged Windows");
+        return;
+    }
+    tx::list_root_entries();
+    for (i, g) in targets.iter().enumerate() {
+        info!(
+            "TX: ===== target {}/{}: 10de:{:04x} @ {:04x}:{:02x}:{:02x}.{} =====",
+            i + 1,
+            targets.len(),
+            g.device_id,
+            g.seg,
+            g.bus,
+            g.dev,
+            g.fun
+        );
+        tx_one_card(g);
+    }
+    info!("TX: multi-GPU pass complete ({} target(s) processed)", targets.len());
+}
+
+/// One card's full transaction. Every outcome continues the multi-GPU
+/// loop: EALREADY/EWarm are skip-class, a hard failure gets its own
+/// emergency FLR on THIS card only - the next card still runs.
+#[cfg(feature = "tx")]
+fn tx_one_card(g: &pci::FoundGpu) {
     use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams};
     let proto = unsafe {
         boot::open_protocol::<pci::PciIo>(
-            OpenProtocolParams { handle, agent: boot::image_handle(), controller: None },
+            OpenProtocolParams { handle: g.handle, agent: boot::image_handle(), controller: None },
             OpenProtocolAttributes::GetProtocol,
         )
     };
@@ -93,12 +123,11 @@ fn tx_phase(handle: uefi::Handle) {
         return;
     };
     let gpu = tx::TxGpu { pci: &pci, bar: 0 };
-    tx::list_root_entries();
 
     // Per-family asset selection by PCI device ID (constitution 5: no
     // cross-family payloads — a GA102 payload on AD102 HALTs and opens
     // nothing). Names on the boot volume: <asset>_<family>.bin.
-    let dev = pci.config_read_u16(0x02);
+    let dev = g.device_id;
     let family: &str = match dev {
         // AD10x (Ada): the full upstream ad102_family() routing table -
         // every listed ID uses the same pinned AD102 booter/payload.
@@ -106,12 +135,15 @@ fn tx_phase(handle: uefi::Handle) {
         // verified here: 28e0; the rest are upstream-admitted IDs. 28a1 is
         // NVIDIA's other 4050 Laptop ID (same AD107M die as verified-silicon
         // 28e1, same 28xx block) but missing from upstream's table.
-        // TODO(28a1): first-silicon run should re-verify checklist evidence.
+        // 2820 is the AD106M 4070 Laptop (also upstream-absent); the same
+        // family assets as the verified 2803 desktop AD106 apply.
+        // TODO(28a1,2820): first-silicon run should re-verify checklist
+        // evidence.
         0x2684 | 0x2685 | 0x2689  // AD102 4090 / 4090D / 4070TiS
         | 0x2702 | 0x2704 | 0x2705 | 0x2709  // AD103 4080S/4080/4070TiS/4070
         | 0x2757  // AD103M 4090 Laptop
         | 0x2782 | 0x2783 | 0x2786  // AD104 4070Ti/4070S/4070
-        | 0x2803 | 0x2805  // AD106 4060Ti / 4060Ti 16GB
+        | 0x2803 | 0x2805 | 0x2820  // AD106 4060Ti / 4060Ti 16GB / 4070M
         | 0x2882 | 0x28a0 | 0x28a1 | 0x28e0 | 0x28e1  // AD107 4060/4060L/4050L/4060M/4050M
         => "ad102",
         // GA10x (Ampere): 3090/3080/3070/3060/3050/CPM170HX...
@@ -158,7 +190,13 @@ fn tx_phase(handle: uefi::Handle) {
     // First fire = chain-replay (no V67 at root) unless the payload file is
     // staged deliberately.
     let assets = tx::TxAssets { family, booter, boot_desc, gsp_boot, gsp_image, stock_sig, v67, bl };
-    match tx::run_transaction(&gpu, &assets, handle) {
+    // Size validation before ANY GPU interaction (issue #4.3): a damaged
+    // stick must be refused here - the DMA copies use fixed windows.
+    if let Err(e) = tx::validate_asset_sizes(&assets) {
+        info!("TX: asset validation failed ({e:?}) - nothing was touched, chain-loading Windows");
+        return;
+    }
+    match tx::run_transaction(&gpu, &assets, g.handle) {
         Ok(()) => {
             info!("SELECTOR RESULT: transaction complete");
             tx::handoff_out(&pci);
@@ -182,7 +220,7 @@ fn tx_phase(handle: uefi::Handle) {
             info!("TX: transaction failed: {e:?} - NOT retrying this session");
             // Failure unwind: FLR wipes our half-states (engine resets, BCR,
             // DMA queues) so the Windows driver gets a cold-boot card.
-            tx::emergency_flr(handle);
+            tx::emergency_flr(g.handle);
             tx::handoff_out(&pci);
         }
     }

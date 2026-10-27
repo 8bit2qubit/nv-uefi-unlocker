@@ -407,14 +407,37 @@ pub fn write_selector(gpu: &TxGpu, name: &str, offset: u32, unlock: u32) -> Resu
     }
 }
 
+/// Post-start wait semantics (canonical falcon_hs `wait_plm` split).
+/// `Halt`: the booter returns normally and writes its status - replay runs
+/// and the Ada payload (marker + halt tail gadgets, M4-verified). `PlmFlip`:
+/// the GA102 V67's tail is the fill self-loop (0x0000019c) - the booter
+/// NEVER halts and writes no mailbox marker; the canonical verdict is the
+/// FEAT PLM cold->open transition, and a HALT observed during the wait is
+/// the FAILURE sign (a normal return means the signature DMA missed the
+/// stack, i.e. the exploit did not run). Issue #6: the GA106M payload run
+/// flipped the PLM but was judged ETimeout on the HALT poll - an inverted
+/// verdict. Mirrors tx::falcon_hs's wait_plm branch (unlock_610.c 403-424).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BooterWait {
+    Halt,
+    PlmFlip,
+}
+
 /// SEC2 booter fire, GA10x/Ada HS variant. Portal placement (the falcon
 /// DMA engine accepts 64 commands and never consumes them in this window,
 /// measured on both engines), then the kernel BootFromHs tail verbatim:
 /// IMEM at physical 0 with virtual tags from app_code_off (dest=imemPa=0,
 /// memOff=imemVa), DMEM at 0 (the patched signature rides inside the DMEM
 /// section at patch_loc - data_off), BROM PKC params, BOOTVEC=imemVa,
-/// WprMeta address in the mailboxes, start, HALT.
-pub fn booter_fire(gpu: &TxGpu, hdr: &BooterHdr, image: &[u8], meta_addr: u64, local_fb: bool) -> Result<(), TxError> {
+/// WprMeta address in the mailboxes, start, then `wait` (see BooterWait).
+pub fn booter_fire(
+    gpu: &TxGpu,
+    hdr: &BooterHdr,
+    image: &[u8],
+    meta_addr: u64,
+    local_fb: bool,
+    wait: BooterWait,
+) -> Result<(), TxError> {
     const SEC2: u32 = crate::tx::eng::SEC2;
     let sig_dmem = hdr.patch_loc - hdr.data_off;
     // Kernel rule: every HS execute is preceded by an engine reset. After a
@@ -497,7 +520,39 @@ pub fn booter_fire(gpu: &TxGpu, hdr: &BooterHdr, image: &[u8], meta_addr: u64, l
         let imm2 = gpu.pci.bar_read_u32(gpu.bar, (SEC2 + 0x100) as u64);
         info!("BOOTER start-probe: alias retry -> {imm2:#010x}");
     }
-    let r = gpu.poll_us(SEC2 + 0x100, 1 << 4, 1 << 4, 5_000_000, true);
+    let r: Result<(), TxError> = match wait {
+        BooterWait::Halt => gpu.poll_us(SEC2 + 0x100, 1 << 4, 1 << 4, 5_000_000, true),
+        BooterWait::PlmFlip => {
+            // unlock_610.c falcon_hs wait_plm=true loop: vetted reads, the
+            // PLM cold->open transition is success, HALT is -EIO. Entry PLM
+            // must be closed for the flip to prove anything (claim_guards
+            // EALREADY already rejects an open GA10x PLM upstream of here).
+            let entry = gpu.pci.bar_read_u32(gpu.bar, crate::tx::regs::FEAT_PLM as u64);
+            info!("BOOTER wait_plm: entry FEAT_PLM={entry:#010x} (cold entry must be closed; open entry cannot prove execution)");
+            let mut verdict = Err(TxError::ETimeout { tolerated: false });
+            let max_iters = 5_000_000 / 75 + 1;
+            for i in 0..max_iters {
+                let engine = gpu.pci.bar_read_u32(gpu.bar, (SEC2 + 0x100) as u64);
+                if engine == !0u32 || engine & 0xffff_0000 == 0xbadf_0000 {
+                    verdict = Err(TxError::ENodev);
+                    break;
+                }
+                let plm = gpu.pci.bar_read_u32(gpu.bar, crate::tx::regs::FEAT_PLM as u64);
+                if plm == !0u32 && entry != !0u32 {
+                    info!("BOOTER wait_plm: PLM flip {entry:#010x} -> 0xffffffff after ~{}us - payload executed (booter stays in the fill self-loop; no halt will follow)", i * 75);
+                    verdict = Ok(());
+                    break;
+                }
+                if engine & (1 << 4) != 0 {
+                    info!("BOOTER wait_plm: early PLM failed - the booter halted WITHOUT flipping the PLM (signature DMA missed the stack): cpuctl={engine:#010x} plm={plm:#010x} entry={entry:#010x}");
+                    verdict = Err(TxError::EIO);
+                    break;
+                }
+                uefi::boot::stall(core::time::Duration::from_micros(75));
+            }
+            verdict
+        }
+    };
     let cpuctl_now = gpu.pci.bar_read_u32(gpu.bar, (SEC2 + 0x100) as u64);
     let mbox0 = gpu.pci.bar_read_u32(gpu.bar, (SEC2 + 0x40) as u64);
     let exci = gpu.pci.bar_read_u32(gpu.bar, (SEC2 + 0x0d0) as u64);
@@ -664,14 +719,17 @@ fn wpr_desc_rejected_hint(mbox0: u32, meta: &[u8]) {
     }
 }
 
-/// Execution verdict. Payload mode (V67): the Ada four-PLM read-back plus
-/// the mailbox marker. Chain-replay mode (stock booter): the booter's own
-/// status (mailbox0 == 0, kernel s_executeBooterUcode semantics) plus WPR2
-/// still up - the stock booter never touches the PLM selectors, so
-/// demanding unlock values here would fail a correct run. `meta` is the
-/// host view of the published WprMeta DMA page, for the failure-path
-/// readback in `wpr_desc_rejected_hint`.
-pub fn verify_execution(gpu: &TxGpu, payload_mode: bool, meta: &[u8]) -> Result<(), TxError> {
+/// Execution verdict. Payload mode: family-dependent. GA102 (canonical V67,
+/// single FEAT PLM write + fill self-loop tail): the PLM flip is the whole
+/// verdict - no mailbox marker exists, and the WPRCFG/FBPA/WPR words are
+/// Ada-chain writes this blob does not carry. Ada (four-write chain): the
+/// four-PLM read-back plus the mailbox marker. Chain-replay mode (stock
+/// booter): the booter's own status (mailbox0 == 0, kernel
+/// s_executeBooterUcode semantics) plus WPR2 still up - the stock booter
+/// never touches the PLM selectors, so demanding unlock values here would
+/// fail a correct run. `meta` is the host view of the published WprMeta DMA
+/// page, for the failure-path readback in `wpr_desc_rejected_hint`.
+pub fn verify_execution(gpu: &TxGpu, family: &str, payload_mode: bool, meta: &[u8]) -> Result<(), TxError> {
     let plm = gpu.pci.bar_read_u32(gpu.bar, crate::tx::regs::FEAT_PLM as u64);
     let ss0 = gpu.pci.bar_read_u32(gpu.bar, crate::tx::regs::FEAT_SS0 as u64);
     let ss1 = gpu.pci.bar_read_u32(gpu.bar, crate::tx::regs::FEAT_SS1 as u64);
@@ -708,6 +766,13 @@ pub fn verify_execution(gpu: &TxGpu, payload_mode: bool, meta: &[u8]) -> Result<
     let fbpa = gpu.pci.bar_read_u32(gpu.bar, crate::tx::regs::FBPA_PLM as u64);
     let wpr = gpu.pci.bar_read_u32(gpu.bar, crate::tx::regs::WPR_PLM as u64);
     info!("POST-BOOT: WPRCFG={wprcfg:#x} FBPA={fbpa:#x} WPR={wpr:#x}");
+    if family == "ga102" {
+        // GA102 canonical payload: ONE write (FEAT_OVR_PLM). The ga102
+        // patched-word table (assets payload.rs) carries no marker and no
+        // WPRCFG/FBPA/WPR writes; those logs are informational here. The
+        // SS0/SS1 selectors follow host-side from the open PLM (issue #6).
+        return Ok(());
+    }
     if wprcfg != 0xffff_f0ff || wpr != 0xffff_ffff {
         return Err(TxError::EIO);
     }

@@ -388,7 +388,8 @@ impl DmaBuffer {
     }
 }
 
-/// The first NVIDIA display device found by [`enumerate`] (function 0 only).
+/// One NVIDIA display adapter found by [`enumerate`] (function 0 only).
+#[derive(Clone, Copy)]
 pub struct FoundGpu {
     pub handle: uefi::Handle,
     pub device_id: u16,
@@ -400,19 +401,25 @@ pub struct FoundGpu {
 
 /// Enumerate all PCI(e) devices; NVIDIA (10de) ones get the capability walk.
 /// Read-only: config-space reads only, zero writes (constitution §1.7/M0).
-/// Returns the first NVIDIA GPU (class 03xx, function 0) for M1 sampling.
-pub fn enumerate() -> Option<FoundGpu> {
+/// Returns EVERY NVIDIA display adapter (class 03, function 0) found, in
+/// firmware enumeration order.
+///
+/// Multi-GPU (2026-10-27): the caller decides what runs - the TX phase
+/// processes every supported card in this order (see `select_tx_targets`),
+/// the M1 sample takes the first. A `\tx-select-bdf.txt` marker
+/// ("bb:dd.f" or "dddd:bb:dd.f", hex) pins exactly one card instead.
+pub fn enumerate() -> alloc::vec::Vec<FoundGpu> {
     info!("PHASE: ENUMERATE (read-only)");
     let handles = match boot::locate_handle_buffer(SearchType::ByProtocol(&PciIo::GUID)) {
         Ok(h) => h,
         Err(e) => {
             info!("ENUMERATE: locate_handle_buffer failed: {:?}", e.status());
-            return None;
+            return alloc::vec::Vec::new();
         }
     };
     info!("ENUMERATE: {} PciIo handles", handles.len());
 
-    let mut found: Option<FoundGpu> = None;
+    let mut candidates: alloc::vec::Vec<FoundGpu> = alloc::vec::Vec::new();
     for handle in handles.iter() {
         // Safety: GetProtocol performs no driver binding; protocol
         // interface stays valid while the handle lives (all of boot time).
@@ -456,8 +463,11 @@ pub fn enumerate() -> Option<FoundGpu> {
         );
 
         if vendor == NVIDIA_VENDOR_ID {
-            if found.is_none() && fun == 0 {
-                found = Some(FoundGpu {
+            // Candidate = NVIDIA display adapter (class 03), function 0.
+            // Other NVIDIA functions (HDA audio, NICs) are logged but never
+            // selected - the old first-fun-0 rule could match those.
+            if fun == 0 && class >> 8 == 0x03 {
+                candidates.push(FoundGpu {
                     handle: *handle,
                     device_id: device,
                     seg, bus, dev, fun,
@@ -466,7 +476,83 @@ pub fn enumerate() -> Option<FoundGpu> {
             describe_nvidia(&pci, seg, bus, dev, fun, device);
         }
     }
-    found
+    if candidates.len() > 1 {
+        info!("ENUMERATE: {} NVIDIA display adapters present:", candidates.len());
+        for c in candidates.iter() {
+            info!(
+                "ENUMERATE:   candidate {:04x}:{:02x}:{:02x}.{} dev=10de:{:04x}",
+                c.seg, c.bus, c.dev, c.fun, c.device_id
+            );
+        }
+    }
+    candidates
+}
+
+/// TX target selection. Default (no marker): EVERY supported card runs, in
+/// enumeration order - one boot unlocks the whole board, and a card that is
+/// already unlocked (EALREADY) or unsupported simply yields to the next.
+/// A `\tx-select-bdf.txt` marker pins exactly one card instead; a pinned
+/// BDF that matches nothing (or an unparsable marker) refuses to guess and
+/// returns an empty set - the stick owner asked for a specific card and no
+/// other one may run.
+#[cfg(feature = "tx")]
+pub fn select_tx_targets(all: &[FoundGpu]) -> alloc::vec::Vec<FoundGpu> {
+    match crate::tx::read_boot_file("\\tx-select-bdf.txt") {
+        Some(raw) => match parse_bdf(&raw) {
+            Some(bdf) => {
+                for c in all.iter() {
+                    if (c.seg, c.bus, c.dev, c.fun) == bdf {
+                        info!(
+                            "ENUMERATE: tx-select-bdf matched {:04x}:{:02x}:{:02x}.{} - only this card runs",
+                            c.seg, c.bus, c.dev, c.fun
+                        );
+                        return alloc::vec![*c];
+                    }
+                }
+                info!(
+                    "ENUMERATE: tx-select-bdf {:04x}:{:02x}:{:02x}.{} matches no candidate - refusing to guess, TX skipped",
+                    bdf.0, bdf.1, bdf.2, bdf.3
+                );
+                alloc::vec::Vec::new()
+            }
+            None => {
+                info!("ENUMERATE: tx-select-bdf.txt unparsable (want bb:dd.f or dddd:bb:dd.f hex) - refusing to guess, TX skipped");
+                alloc::vec::Vec::new()
+            }
+        },
+        None => {
+            if all.len() > 1 {
+                info!(
+                    "ENUMERATE: no tx-select-bdf marker - every supported card runs, in enumeration order ({} found)",
+                    all.len()
+                );
+            }
+            all.to_vec()
+        }
+    }
+}
+
+/// Parse "bb:dd.f" or "dddd:bb:dd.f" (hex, whitespace/NUL tolerant).
+#[cfg(feature = "tx")]
+fn parse_bdf(raw: &[u8]) -> Option<(usize, usize, usize, usize)> {
+    let clean: alloc::vec::Vec<u8> = raw
+        .iter()
+        .copied()
+        .filter(|b| !b.is_ascii_whitespace() && *b != 0)
+        .collect();
+    let s = core::str::from_utf8(&clean).ok()?;
+    let (seg, rest) = if s.matches(':').count() == 2 {
+        let (a, b) = s.split_once(':')?;
+        (usize::from_str_radix(a, 16).ok()?, b)
+    } else {
+        (0, s)
+    };
+    let (bus_s, devfun) = rest.split_once(':')?;
+    let (dev_s, fun_s) = devfun.split_once('.')?;
+    let bus = usize::from_str_radix(bus_s, 16).ok()?;
+    let dev = usize::from_str_radix(dev_s, 16).ok()?;
+    let fun = usize::from_str_radix(fun_s, 16).ok()?;
+    Some((seg, bus, dev, fun))
 }
 
 /// Logs the GPU's command, status and device control, then the IDs, command,

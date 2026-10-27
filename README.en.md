@@ -41,10 +41,20 @@ This card had never been verified by the community (closest public canary:
 | `fwsignature_ad102.bin` | GSP-RM stock signature (referenced by WprMeta) | ✅ |
 | `scrubber_ad10x.bin` | Kernel-identical SEC2 scrubber (BSI handoff 1→3) | ✅ |
 | `v67-ad102-four-plm.bin` | **The V67 four-write payload — its presence = unlock mode** | optional |
+| `tx-select-bdf.txt` | Multi-GPU card pin: contents `bb:dd.f` or `dddd:bb:dd.f` (hex) | optional |
 | `\loader.log` | (output) full stage log, the evidence record | output |
 
 Without `v67-*.bin` the tool runs in **replay/diagnostic mode**: the full
 chain with zero unlock writes.
+
+**Multi-GPU**: with several supported cards in the machine, the default is
+to process **every one of them in firmware enumeration order** — a card
+that is already unlocked (EALREADY) or unsupported yields to the next, and
+a hard failure emergency-FLRs only that card without blocking the rest.
+The display stays alive when the console lives on another card (only the
+target card's GOP is detached). `\tx-select-bdf.txt` pins exactly one
+card: a pin that matches nothing (or an unparsable file) refuses to guess
+and runs zero transactions that boot.
 
 ### Procedure
 
@@ -209,6 +219,7 @@ the kmod, our EFI path is structurally identical — expected compatible);
 | AD107 | 4060 2882 / 4060 Laptop 28a0 / 4050M 28e1 | 🟢 upstream-verified |
 | AD107 | 4050 Laptop **28a1** | ✅ verified (2026-10-26, v0.1.3): full chain on silicon (WPR2 verified → booter marker → four writes → selectors → signature restore → AON survival after FLR); FP16 tensor **22 → 38-42 TFLOPS (1.7-1.9x)**, integrity self-tests green; the gated `0xbadf1301` goes through the fallback |
 | AD106 | 4060Ti 2803 / 4060Ti 16G 2805 | **2803 ✅ verified** (PR #5, AD106 desktop: replay + unlock + four writes read back, FP16 46.78→75.28 TFLOPS); 2805 🟢 |
+| AD106 | 4070 Laptop **2820** (same ID on modded cards) | 🟡 routed (2026-10-28): shares the AD106 family assets, same die family as 2803 (upstream's table lacks this ID too). First silicon run: post the full `\loader.log` per "If something does not work" below; the tier moves up only after that. Modded cards: also include the original card model and VBIOS version |
 | AD104 | 4070Ti 2782 / 4070S 2783 / 4070 2786 | 🟢 |
 | AD103 | 4080S 2702 / 4080 2704 / 4070TiS 2705 / 4070 2709 / 4090M 2757 | 🟢 |
 | AD102 | 4090 2684 / 4090D 2685 / 4070TiS 2689 | 🟢 |

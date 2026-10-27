@@ -9,7 +9,10 @@ pub fn print(version: &str) {
     {
         info!(" ** TX BUILD: CONTAINS GPU-WRITE PATHS **");
         info!(" transaction: claim->gfw->fwsec->booter->selectors->flr");
-        info!(" 30s no-key = ABORT to Windows; failure = no retry");
+        info!(" SPACE = run; any other key or 30s no-key = ABORT to Windows");
+        info!(" multi-GPU: no marker = every supported card in order;");
+        info!("            \\tx-select-bdf.txt (bb:dd.f) pins exactly one");
+        info!(" failure = no retry (per card; the next card still runs)");
     }
     #[cfg(not(feature = "tx"))]
     {

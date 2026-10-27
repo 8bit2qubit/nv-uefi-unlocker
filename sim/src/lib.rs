@@ -48,6 +48,15 @@ pub enum BootMode {
     /// Ada four-write chain (single fire, gpu-unlock-ada AD102 payload):
     /// WPR_CFG=0xfffff0ff, FBPA/WPR/FEAT=0xffffffff, then marker+HALT.
     AdaFourWrite,
+    /// GA102 canonical V67 (single FEAT PLM write + fill self-loop tail):
+    /// the PLM opens and the core KEEPS RUNNING in the self-loop - no
+    /// marker, no halt, ever (issue #6: the canonical wait is the PLM
+    /// flip; a halt during the wait is the failure sign).
+    Ga102SelfLoop,
+    /// GA102 pathology: the core spins (PC in the fill loop) but the PLM
+    /// never opens - the ROP's write was dropped. The wait_plm verdict
+    /// must be a timeout, not a success.
+    SelfLoopNoFlip,
     /// PLM stuck open before the transaction (guard: -EALREADY analog).
     PlmStuckOpen,
     /// SEC2 HALTs after start (marker path).
@@ -194,6 +203,17 @@ impl FakeGpu {
                     self.w32(regs::WPR_PLM, 0xffff_ffff);
                     self.w32(regs::FEAT_PLM, 0xffff_ffff);
                     self.w32(regs::SEC2_CPUCTL, regs::CPUCTL_HALTED);
+                }
+                BootMode::Ga102SelfLoop => {
+                    // One write (FEAT PLM), then the fill self-loop: the
+                    // core keeps running, mailbox0 keeps the meta pointer.
+                    self.w32(regs::FEAT_PLM, 0xffff_ffff);
+                    self.w32(regs::SEC2_CPUCTL, 0);
+                }
+                BootMode::SelfLoopNoFlip => {
+                    // Spinning in the fill loop, write dropped: no PLM, no
+                    // halt - the wait must time out.
+                    self.w32(regs::SEC2_CPUCTL, 0);
                 }
                 BootMode::PlmStuckOpen => self.w32(regs::SEC2_CPUCTL, !0u32), // C boot_mode 2
                 BootMode::Halt => self.w32(regs::SEC2_CPUCTL, regs::CPUCTL_HALTED),

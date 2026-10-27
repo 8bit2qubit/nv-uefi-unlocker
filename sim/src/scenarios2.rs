@@ -223,3 +223,67 @@ fn t22_replay_halt_missing_fails() {
     assert_eq!(err.phase, "verify");
     assert!(err.reason.contains("halted"));
 }
+
+fn run_ga102(faults: Faults) -> Result<crate::transaction::Report, PhaseError> {
+    let mut gpu = FakeGpu::new_locked_cold(None);
+    Transaction::new_ga102_payload(&mut gpu, faults).run()
+}
+
+/// GA102 canonical payload (issue #6 root cause, now the fix's contract):
+/// single PLM write + fill self-loop tail. The verdict is the PLM flip -
+/// NO marker, NO halt (the core keeps running by design); the triad
+/// verdict that failed the GA106M run must never gate this shape.
+#[test]
+fn t23_ga102_self_loop_plm_flip_happy_path() {
+    let mut gpu = FakeGpu::new_locked_cold(None);
+    gpu.boot_mode = crate::BootMode::Ga102SelfLoop;
+    let report = Transaction::new_ga102_payload(&mut gpu, Faults::default())
+        .run()
+        .expect("GA102 self-loop payload: PLM flip is the whole verdict");
+    assert!(report.unwind_clean && report.selectors_written && report.flr_done);
+    assert!(report.plm_open_verified);
+    assert!(!report.marker_seen, "GA102 payload writes no marker");
+    assert!(!report.halt_seen, "GA102 payload never halts (self-loop)");
+    assert_eq!(gpu.read(regs::FEAT_PLM), 0xffff_ffff);
+    assert_eq!(gpu.read(regs::FEAT_SS0), 0x8888_8888, "selectors from the open PLM");
+    assert_eq!(gpu.read(regs::FEAT_SS1), 0x8);
+}
+
+/// GA102 payload missed the stack: the booter executes stock, reports its
+/// signature error and HALTs with the PLM still locked - the canonical
+/// "early PLM failed" verdict, NOT a success and NOT a timeout.
+#[test]
+fn t24_ga102_payload_early_halt_is_failure() {
+    let mut gpu = FakeGpu::new_locked_cold(None);
+    gpu.boot_mode = crate::BootMode::Halt;
+    let err = Transaction::new_ga102_payload(&mut gpu, Faults { plm_missing: true, ..Default::default() })
+        .run()
+        .unwrap_err();
+    assert_eq!(err.phase, "verify");
+    assert!(err.reason.contains("early PLM failed"), "{err:?}");
+    assert_ne!(err.phase, "unwind", "failure must still unwind clean");
+}
+
+/// GA102 payload spinning in the fill loop with the write dropped: the
+/// wait must time out - a spinning core alone proves nothing.
+#[test]
+fn t25_ga102_payload_spin_without_flip_times_out() {
+    let mut gpu = FakeGpu::new_locked_cold(None);
+    gpu.boot_mode = crate::BootMode::SelfLoopNoFlip;
+    let err = Transaction::new_ga102_payload(&mut gpu, Faults { plm_flip_missing: true, ..Default::default() })
+        .run()
+        .unwrap_err();
+    assert_eq!(err.phase, "verify");
+    assert!(err.reason.contains("ETIMEDOUT"), "{err:?}");
+}
+
+/// The old bug as a regression test: running the GA102 self-loop shape
+/// through the Ada triad verdict fails a correct run (exactly issue #6).
+#[test]
+fn t26_ga102_shape_rejected_by_ada_triad_proves_the_shapes_differ() {
+    let mut gpu = FakeGpu::new_locked_cold(None);
+    gpu.boot_mode = crate::BootMode::Ga102SelfLoop;
+    let err = Transaction::new(&mut gpu, Faults::default()).run().unwrap_err();
+    assert_eq!(err.phase, "verify");
+    assert!(err.reason.contains("triad"), "Ada triad must NOT pass a GA102 self-loop run: {err:?}");
+}
