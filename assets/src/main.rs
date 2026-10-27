@@ -132,6 +132,34 @@ fn vbios(rom: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Proven BOOT_DIRECT bootloader slice: verify the cmp50hx GspRmBoot debug
+/// archive (pinned sha) and emit its first 0x6000 bytes as gsp_boot_tu10x.bin
+/// — the exact image our TU106 unlock fired with, and the same input the
+/// 50HX/40HX/chenxluo Windows runs fed the booter.
+fn slice_proven_rm_boot(blob: &Path, outdir: &Path) -> Result<(), String> {
+    use assets::manifest::{sha256_hex, tu10x_610 as pins};
+    let data = std::fs::read(blob).map_err(|e| format!("read: {e}"))?;
+    let src_digest = sha256_hex(&data);
+    if src_digest != pins::PROVEN_RM_BOOT_SLICE_SRC_SHA256 {
+        return Err(format!(
+            "proven GspRmBoot blob mismatch: got {src_digest} want {} (pinned cmp50hx gsp_rm_boot_dbg.bin only)",
+            pins::PROVEN_RM_BOOT_SLICE_SRC_SHA256
+        ));
+    }
+    let slice = &data[..pins::PROVEN_RM_BOOT_SLICE_LEN];
+    let digest = sha256_hex(slice);
+    if digest != pins::PROVEN_RM_BOOT_SLICE_SHA256 {
+        return Err(format!("proven slice mismatch: {digest}"));
+    }
+    std::fs::create_dir_all(outdir).map_err(|e| e.to_string())?;
+    std::fs::write(outdir.join("gsp_boot_tu10x.bin"), slice).map_err(|e| e.to_string())?;
+    println!(
+        "gsp_boot_tu10x.bin: {} bytes, SHA-256 verified (proven BL slice, fired on TU106 2026-10-27)",
+        slice.len()
+    );
+    Ok(())
+}
+
 fn extract_tu10x(source: &Path, outdir: &Path) -> Result<(), String> {
     use assets::booter::{build_bundle_direct, build_gsp_boot_v4};
     use assets::manifest::{sha256_hex, tu10x_610 as pins};
@@ -214,7 +242,7 @@ fn extract_scrub(source: &Path, outdir: &Path) -> Result<(), String> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let usage = "usage: assets <generate [out.bin] | generate-ad102 [out.bin] | generate-tu10x [out.bin] | extract <src.tar.xz> <outdir> | extract-ad102 <src.tar.xz> <outdir> | extract-tu10x <src.tar.xz> <outdir> | extract-scrub <src.tar.xz> <outdir> | fw <pkg.tar.zst> <outdir> | gsp-sections <gsp.bin> <outdir> | vbios <rom>>";
+    let usage = "usage: assets <generate [out.bin] | generate-ad102 [out.bin] | generate-tu10x [out.bin] | extract <src.tar.xz> <outdir> | extract-ad102 <src.tar.xz> <outdir> | extract-tu10x <src.tar.xz> <outdir> | extract-scrub <src.tar.xz> <outdir> | slice-proven-rm-boot <gsp_rm_boot_dbg.bin> <outdir> | fw <pkg.tar.zst> <outdir> | gsp-sections <gsp.bin> <outdir> | vbios <rom>>";
     let result = match args.get(1).map(String::as_str) {
         Some("generate") => {
             let out: PathBuf = args
@@ -261,7 +289,14 @@ fn main() {
             _ => Err(usage.to_string()),
         },
         Some("extract-tu10x") => match (args.get(2), args.get(3)) {
-            (Some(src), Some(out)) => extract_tu10x(Path::new(src), Path::new(out)),
+            (Some(s), Some(o)) => extract_tu10x(Path::new(s), Path::new(o)),
+            _ => Err(usage.to_string()),
+        },
+        // slice-proven-rm-boot <gsp_rm_boot_dbg.bin> <outdir>
+        // Verifies the pinned cmp50hx GspRmBoot debug archive and writes the
+        // proven 24KiB bootloader slice as gsp_boot_tu10x.bin.
+        Some("slice-proven-rm-boot") => match (args.get(2), args.get(3)) {
+            (Some(s), Some(o)) => slice_proven_rm_boot(Path::new(s), Path::new(o)),
             _ => Err(usage.to_string()),
         },
         Some("extract-scrub") => match (args.get(2), args.get(3)) {

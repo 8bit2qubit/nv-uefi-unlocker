@@ -117,6 +117,19 @@ pub mod tu10x_610 {
     pub const BINDATA_SEC2_BL_SHA256: &str =
         "fc0bc277eeee754ea3071ae0fe8360a52193565bba7c07dcea60b00e8d56d9c8";
 
+    /// PROVEN BL image for the BOOT_DIRECT booter: the first 0x6000 bytes of
+    /// cmp50hx-unlock's gsp_rm_boot_dbg.bin (GspRmBoot debug archive, 128KiB,
+    /// extracted from the same pinned 610.43.03 driver; upstream MIT). The
+    /// kernel BINDATA UCODE_IMAGE is only 4096B - too small for the
+    /// bootloader the booter consumes; the 24KiB slice is what the 50HX/40HX
+    /// and chenxluo TU102-22G Windows runs all fed the booter. Our TU106
+    /// unlock fired with exactly this slice (de676bae...).
+    pub const PROVEN_RM_BOOT_SLICE_SRC_SHA256: &str =
+        "fa43239bcee7b97ca62f007cc68487560a39e19f74f3dde7486db3f98df8e471";
+    pub const PROVEN_RM_BOOT_SLICE_LEN: usize = 0x6000;
+    pub const PROVEN_RM_BOOT_SLICE_SHA256: &str =
+        "de676bae28a480011d3d012db14bef539324e62a841a9627863c689bea168af3";
+
     pub const DERIVED_BOOTER_LOAD: &str =
         "51507de61777cf46f3703a084cdfa896c21f6bc0c8af8f245bd09b2e9c49bf54";
     pub const DERIVED_GSP_BOOT: &str =

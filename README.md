@@ -39,7 +39,7 @@ FLR 会重锁 PLM、Windows 驱动需 GSP 模式——均与 Ada 不同）。
 
 不放 `v67-*.bin` 即为**回放/诊断模式**：走完全链但零解锁写入（刷存在感
 的安全/取证模式）。日志中 `family 'xxx' transaction track not enabled`
-表示该芯片族尚未开放事务（当前仅 ad102 系启用）。
+表示该芯片族尚未开放事务（20/30/40 三族均已接入；缺资产则跳过）。
 
 ### 操作流程
 
@@ -56,6 +56,19 @@ FLR 会重锁 PLM、Windows 驱动需 GSP 模式——均与 Ada 不同）。
 V67 payload 与全部资产再生成：`cargo run -p assets -- generate-ad102` /
 `release/make-usbroot.ps1`（从钉 SHA-256 的 610.43.03 公开输入本地再生，
 产物 hash 硬校验；期望值见报告哈希表）。
+
+release 包只发脚本与自产二进制（`BOOTX64.EFI`、`assets-x86_64-windows.exe`、
+`make-usbroot.ps1`、`enable-turing-unlock.ps1`），**不含任何 NVIDIA bin**——
+全部固件件由 maker 从上面钉 SHA-256 的公开输入现场再生：
+
+```powershell
+.\make-usbroot.ps1 -Family ad102 ...   # 40 系（默认；rtx40 / 40 同义）
+.\make-usbroot.ps1 -Family ga102 ...   # 30 系（rtx30 / 30 同义）
+.\make-usbroot.ps1 -Family tu10x ...   # 20 / 16 系（rtx20 / 20 同义；GSP 门强制）
+```
+
+Turing 的 proven BL 归档 `gsp_rm_boot_dbg.bin` 由脚本自动从钉 SHA-256 的
+cmp50hx 仓库下载；离线时用 `-ProvenBlob <path>` 指本地文件。
 
 ### 显示模式 × 上次离开方式：可用性实测（G614JV / 4060L / 三模完整支持，2026-10-26）
 
@@ -205,7 +218,8 @@ legacy 初始化路径撞上打开的 FEAT PLM 会 TDR 风暴/Code 43（40 系/A
 要求，v0.1.x 的 40 系用户不受影响）。**运行一次**（管理员 PowerShell）：
 
 ```powershell
-tools\windows\enable-turing-unlock.ps1           # 检测 Turing 卡并写 EnableGpuFirmware=1
+tools\windows\enable-turing-unlock.ps1           # 源码树；检测 Turing 卡并写 EnableGpuFirmware=1
+.\enable-turing-unlock.ps1                       # release 包内（与 maker 同目录）
 tools\windows\enable-turing-unlock.ps1 -Remove   # 回滚到 stock
 ```
 
@@ -217,10 +231,21 @@ tools\windows\enable-turing-unlock.ps1 -Remove   # 回滚到 stock
 不重新初始化——GSP 模式不生效，而旧驱动会话遇到解锁态会 TDR。流程：运行
 脚本 → 重启（或直接从重启进 U 盘解锁）→ 直通 Windows 验证。
 
-Turing U 盘根布局在 40 系五件基础上多两件（release 包内齐全）：
-`sec2_bl_tu10x.bin`（768B，WITH_LOADER FWSEC 需要）+ `v67-tu10x-four-plm.bin`
-（64000B）。TU106 出厂钳制实测：SS0 冷值非默认（0x15000/0x11000/0x0 引导间
+Turing U 盘由 maker 现场再生（release 包只发脚本）：
+`.\make-usbroot.ps1 -Family tu10x ...`，产物比 40 系多
+`sec2_bl_tu10x.bin`（768B，WITH_LOADER FWSEC 需要）+
+`v67-tu10x-four-plm.bin`（64000B）。maker 在 tu10x 家族**强制检查**
+`EnableGpuFirmware=1` 与 nvidia-smi 的 GSP 固件运行态，任一不满足即拒绝
+构建；异机构建加 `-SkipGspCheck`。通过后 U 盘根会落 `gsp-gate.txt` 存档。
+TU106 出厂钳制实测：SS0 冷值非默认（0x15000/0x11000/0x0 引导间
 漂移）vs 解锁值 0x88888888——"20 系无出厂 segmentation"的旧假设已被修正。
+
+**为什么强制剪裁版 BL 且钉死 hash**：BOOT_DIRECT booter 消费的是 GspRmBoot
+镜像前 `0x6000` 字节（`GSP_RM_BOOT_SIZE`，即 24576 字节，SHA-256
+`de676bae...`）——这正是 v0.2.0 实测成功那一火的输入（日志
+`gsp_boot_tu10x.bin loaded 24576/24576 bytes`）。内核 BINDATA 的 4 KiB v4
+图和 GSP ELF 的前 0x6000（`c76c43b1...`）都不是它；maker 对源归档与输出
+双层校验，长度或 hash 不符即硬失败。
 
 **不兼容/异常时**：请提交 U 盘根的 `\loader.log` 全文到
 [Issues](https://github.com/physicsdolphin/nv-uefi-unlocker/issues)（日志含
