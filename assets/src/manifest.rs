@@ -110,6 +110,12 @@ pub mod tu10x_610 {
     pub const BINDATA_GSP_RM_BOOT: &str = "g_bindata_kgspGetBinArchiveGspRmBoot_TU102.c";
     pub const BINDATA_GSP_RM_BOOT_SHA256: &str =
         "19628e0b148a5437b351ce9ecd4a04405ec4eb66521e1c318ca6ef5d1a0c2efe";
+    /// Generic falcon BL ("works for both SEC2 and GSP"): the WITH_LOADER
+    /// loader that DMAs FWSEC's secure code from host memory into secure
+    /// IMEM (cmp50hx v70; host secure-IMEM writes are scrubbed).
+    pub const BINDATA_SEC2_BL: &str = "g_bindata_ksec2GetBinArchiveBlUcode_TU102.c";
+    pub const BINDATA_SEC2_BL_SHA256: &str =
+        "fc0bc277eeee754ea3071ae0fe8360a52193565bba7c07dcea60b00e8d56d9c8";
 
     pub const DERIVED_BOOTER_LOAD: &str =
         "51507de61777cf46f3703a084cdfa896c21f6bc0c8af8f245bd09b2e9c49bf54";
@@ -117,6 +123,16 @@ pub mod tu10x_610 {
         "8765694cd38beaa4e2b8b1b83a31fb7aee6cb9d8b7c6bc7a86e6d931a3a056c2";
     pub const DERIVED_GSP_BOOT_DESC: &str =
         "9e7cca2cfdc5ce601b0adba39967850046108df6c2d23fff95578ca3f0ccbe01";
+    pub const DERIVED_SEC2_BL: &str = "UNMEASURED";
+
+    /// TU102 V67 signature image, mutex-free variant — pinned from
+    /// nlzy/turing-unlock firmware/artifacts-610.43.03.json
+    /// ("tu102_payload", generator firmware/generate_v67.py; the same
+    /// image is proven live by cmp50hx-unlock efi-unlock on 2026-09-10).
+    /// Two chained writes (FEAT_PLM=0xffffffff, WPR2_HI=0) plus the ACR
+    /// mutex-3 release tokens; fill 0x4a7, guard 0x6140.
+    pub const V67_TU10X_PAYLOAD_SHA256: &str =
+        "b0ec90294d1de3c67e024631c0a11000f281470d76eed806fc24c66b7fd1ef41";
 }
 
 #[cfg(test)]

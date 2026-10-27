@@ -183,3 +183,43 @@ fn t19_ada_four_write_chain() {
     assert_eq!(gpu.read(regs::FEAT_SS0), 0x8888_8888);
     assert_eq!(gpu.read(regs::FEAT_SS1), 0x8);
 }
+
+/// Chain-replay mode (Turing M3 first-fire shape): stock booter, no
+/// payload. Verdict = mailbox0==0 + HALT + WPR2 up; the FEAT PLM stays
+/// locked, no selectors are written, nothing to restore before the FLR.
+#[test]
+fn t20_replay_happy_path() {
+    let mut gpu = FakeGpu::new_locked_cold(None);
+    let (plm_cold, ss0_cold) = (gpu.read(regs::FEAT_PLM), gpu.read(regs::FEAT_SS0));
+    let report = Transaction::new_replay(&mut gpu, Faults::default()).run().expect("replay happy path");
+    assert!(report.unwind_clean && report.flr_done);
+    assert!(!report.selectors_written, "replay must not write selectors");
+    assert!(!report.marker_seen && !report.plm_open_verified, "no payload triad in replay");
+    assert_ne!(plm_cold, 0xffff_ffff, "fixture sanity: cold PLM is not open");
+    assert_eq!(gpu.read(regs::FEAT_PLM), plm_cold, "PLM must stay locked in replay");
+    assert_eq!(gpu.read(regs::FEAT_SS0), ss0_cold, "replay must not touch SS0");
+}
+
+/// Replay with a booter error status (0x89 = WprMeta rejected on DMA
+/// readback): the verdict fails on the status alone - read-back is the
+/// only success criterion, never the absence of an exception.
+#[test]
+fn t21_replay_booter_error_status_fails() {
+    let mut gpu = FakeGpu::new_locked_cold(None);
+    let err = Transaction::new_replay(&mut gpu, Faults { marker_missing: true, ..Default::default() })
+        .run()
+        .unwrap_err();
+    assert_eq!(err.phase, "verify");
+    assert!(err.reason.contains("status"), "expected the booter-status verdict: {err:?}");
+}
+
+/// Replay where the stock booter never halts: EIO at verify, clean unwind.
+#[test]
+fn t22_replay_halt_missing_fails() {
+    let mut gpu = FakeGpu::new_locked_cold(None);
+    let err = Transaction::new_replay(&mut gpu, Faults { halt_not_set: true, ..Default::default() })
+        .run()
+        .unwrap_err();
+    assert_eq!(err.phase, "verify");
+    assert!(err.reason.contains("halted"));
+}

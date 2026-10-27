@@ -18,11 +18,11 @@ fn scenario_01_happy_path_unlock() {
 
     // FWSEC-FRTS fire establishes WPR2.
     gpu.fwsec_wpr = Some((0x1fff_fe00, 0x0400_0000));
-    gpu.write(regs::GFW_CPUCTL, 1);
+    gpu.write(regs::GFW_CPUCTL, 1 << 1); // START = bit 1
     assert_eq!(gpu.read(regs::WPR2_HI), 0x0400_0000, "WPR2 established");
 
     // SEC2 boot with the payload effect opens the PLM.
-    gpu.write(regs::SEC2_CPUCTL, 1);
+    gpu.write(regs::SEC2_CPUCTL, 1 << 1); // START = bit 1
     assert_eq!(gpu.read(regs::FEAT_PLM), 0xffff_ffff, "PLM open after boot");
 
     // Host writes the speed selectors; read-back is the verdict.
@@ -105,7 +105,7 @@ fn scenario_09_sec2_halt_no_plm() {
     gpu.force_write(regs::FEAT_PLM, 0xffff_ff8f);
     gpu.force_write(regs::FEAT_SS0, 0x0000_0001); // observable baseline
     gpu.boot_mode = BootMode::Halt;
-    gpu.write(regs::SEC2_CPUCTL, 1);
+    gpu.write(regs::SEC2_CPUCTL, 1 << 1); // START = bit 1
     assert_eq!(gpu.read(regs::FEAT_PLM), 0xffff_ff8f, "HALT does not open the PLM");
     assert!(write_verified(&mut gpu, regs::FEAT_SS0, 0x8888_8888).is_err());
     assert_eq!(gpu.read(regs::FEAT_SS0), 0x0000_0001);

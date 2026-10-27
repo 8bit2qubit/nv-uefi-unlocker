@@ -133,6 +133,11 @@ fn tx_phase(handle: uefi::Handle) {
     let gsp_image = tx::read_boot_file_fmt("\\fwimage_{}.bin", family);
     let stock_sig = tx::read_boot_file_fmt("\\fwsignature_{}.bin", family);
     let v67 = tx::read_boot_file_fmt("\\v67-{}-four-plm.bin", family);
+    let bl = if family == "tu10x" {
+        tx::read_boot_file("\\sec2_bl_tu10x.bin")
+    } else {
+        None
+    };
     let (Some(booter), Some(gsp_boot), Some(gsp_image), Some(stock_sig)) =
         (booter, gsp_boot, gsp_image, stock_sig) else {
         info!("TX: assets missing for family '{family}' (booter_load_*/gsp_boot_*/fwimage_*/fwsignature_*) - skipping");
@@ -141,17 +146,18 @@ fn tx_phase(handle: uefi::Handle) {
     if v67.is_none() {
         info!("TX: NO V67 file - chain-replay mode (no unlock writes)");
     } else {
-        info!("TX: V67 present - four-write unlock mode");
+        info!("TX: V67 present - unlock mode (family-specific write chain)");
     }
-    if family == "tu10x" {
-        // Turing chain (BOOT_DIRECT booter + WITH_LOADER FWSEC + BSI
-        // scrubber semantics) is implemented but not hardware-validated;
-        // entering the GA10x HS chain on TU106 would write wrong states.
-        // Assets above are parsed+verified as evidence only.
-        info!("TX: family 'tu10x' - Turing transaction track not enabled yet, skipping (no writes)");
+    if family == "tu10x" && bl.is_none() {
+        info!("TX: tu10x missing \\sec2_bl_tu10x.bin (WITH_LOADER FWSEC needs the generic falcon BL) - skipping");
         return;
     }
-    let assets = tx::TxAssets { family, booter, boot_desc, gsp_boot, gsp_image, stock_sig, v67 };
+    // Turing track enabled 2026-10-27 (user M3 go): the chain is the
+    // cmp50hx-proven TU106 recipe - FWSEC BOOT_WITH_LOADER via the generic
+    // falcon BL, BOOT_DIRECT booter fire, replay verdict mbox0==0 + WPR2.
+    // First fire = chain-replay (no V67 at root) unless the payload file is
+    // staged deliberately.
+    let assets = tx::TxAssets { family, booter, boot_desc, gsp_boot, gsp_image, stock_sig, v67, bl };
     match tx::run_transaction(&gpu, &assets, handle) {
         Ok(()) => {
             info!("SELECTOR RESULT: transaction complete");

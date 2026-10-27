@@ -130,7 +130,7 @@ impl TxGpu<'_> {
 /// pre-reset HWCFG2 wait (timeout tolerated, HW bug 3419321) -> reset
 /// pulse with 10 propagation reads each way -> scrub wait -> optional
 /// RISC-V<->Falcon BCR switch -> chip id into the boot vector (+0x84).
-pub fn falcon_reset(gpu: &TxGpu, base: u32, _fbif: u32, falcon2: u32) -> Result<(), TxError> {    info!("Falcon reset begin: base={base:#x}");
+pub fn falcon_reset(gpu: &TxGpu, base: u32, _fbif: u32, falcon2: u32, switch_to_falcon: bool) -> Result<(), TxError> {    info!("Falcon reset begin: base={base:#x} switch_to_falcon={switch_to_falcon}");
     // Pre-reset wait; ETIMEDOUT tolerated.
     if let Err(e) = gpu.poll_us(base + 0xf4, 1 << 31, 1 << 31, 1000, false) {
         match e {
@@ -153,26 +153,39 @@ pub fn falcon_reset(gpu: &TxGpu, base: u32, _fbif: u32, falcon2: u32) -> Result<
     gpu.poll_us(base + 0xf4, 1 << 12, 0, 1_000_000, true)?;
     let hwcfg = gpu.read32(base + 0xf4)?;
     if hwcfg & (1 << 10) != 0 {
-        // RISC-V-capable GSP: force the Falcon core explicitly (kernel
-        // kflcnResetIntoFalcon_GA102 semantics - BCR_CTRL bit4 CORE_SELECT
-        // 0=Falcon/1=RISCV, bit0 VALID reports the switch completed). The
-        // GFW leaves the RISC-V side after boot; a bare "bit4 reads 0"
-        // does NOT prove a completed Falcon selection, and a stale RISC-V
-        // selection stalls the Falcon-compat DMA queue (observed: 32-slot
-        // XFER queue never drains).
-        let bcr = gpu.read32(falcon2 + 0x668)?;
-        info!("Falcon reset: BCR before = {bcr:#010x} (valid={} core_select={})",
-            bcr & 1, bcr >> 4 & 1);
-        let falcon_confirmed = (bcr & 1) != 0 && (bcr >> 4 & 1) == 0;
-        if !falcon_confirmed {
+        if !switch_to_falcon {
+            // Turing: NO explicit core switch exists - kflcnSwitchToFalcon_
+            // TU102 is a soft status only, the BCR VALID bit never asserts,
+            // and a readback stuck at 0x0 is NORMAL (cmp50hx v66 measured;
+            // third TU106 fire timed out right here waiting for it). Park
+            // BCR at Falcon and move on.
             gpu.write32(falcon2 + 0x668, 0);
-            gpu.poll_us(falcon2 + 0x668, 1, 1, 1_000_000, true)?;
-            let bcr2 = gpu.read32(falcon2 + 0x668)?;
-            info!("Falcon reset: BCR after switch = {bcr2:#010x}");
-            // NOTE: a second engine reset cycle here was tried (2026-10-26)
-            // and REVERTED: the reset wiped the BCR switch back to 0x110 AND
-            // hung the HWCFG bit12 scrub wait on both engines (EIO). The
-            // switch-after-reset order matches unlock_610.c exactly.
+            for _ in 0..16 {
+                let _ = gpu.read32(falcon2 + 0x668)?;
+            }
+            boot::stall(core::time::Duration::from_millis(10));
+        } else {
+            // RISC-V-capable GSP: force the Falcon core explicitly (kernel
+            // kflcnResetIntoFalcon_GA102 semantics - BCR_CTRL bit4 CORE_SELECT
+            // 0=Falcon/1=RISCV, bit0 VALID reports the switch completed). The
+            // GFW leaves the RISC-V side after boot; a bare "bit4 reads 0"
+            // does NOT prove a completed Falcon selection, and a stale RISC-V
+            // selection stalls the Falcon-compat DMA queue (observed: 32-slot
+            // XFER queue never drains).
+            let bcr = gpu.read32(falcon2 + 0x668)?;
+            info!("Falcon reset: BCR before = {bcr:#010x} (valid={} core_select={})",
+                bcr & 1, bcr >> 4 & 1);
+            let falcon_confirmed = (bcr & 1) != 0 && (bcr >> 4 & 1) == 0;
+            if !falcon_confirmed {
+                gpu.write32(falcon2 + 0x668, 0);
+                gpu.poll_us(falcon2 + 0x668, 1, 1, 1_000_000, true)?;
+                let bcr2 = gpu.read32(falcon2 + 0x668)?;
+                info!("Falcon reset: BCR after switch = {bcr2:#010x}");
+                // NOTE: a second engine reset cycle here was tried (2026-10-26)
+                // and REVERTED: the reset wiped the BCR switch back to 0x110 AND
+                // hung the HWCFG bit12 scrub wait on both engines (EIO). The
+                // switch-after-reset order matches unlock_610.c exactly.
+            }
         }
     }
     let chip = gpu.read32(0)?;
@@ -458,7 +471,7 @@ pub fn hs_prevalidate(
 /// `post_flr`: we just FLR'd the function ourselves - the GPU's own re-boot
 /// re-provisions WPR2 (measured 0xe00), which is NOT the "already used"
 /// dirty state the guard exists to catch. PLM check stays.
-pub fn claim_guards(gpu: &TxGpu, post_flr: bool) -> Result<(), TxError> {
+pub fn claim_guards(gpu: &TxGpu, family: &str, post_flr: bool) -> Result<(), TxError> {
     // Preflight: is BAR0 decoding at all? Right after the MEM enable a powered
     // dGPU answers; one parked by the EC in D3cold (iGPU-only boot: no GOP on
     // the dGPU) returns all-ones forever. Without this check the failure would
@@ -468,15 +481,17 @@ pub fn claim_guards(gpu: &TxGpu, post_flr: bool) -> Result<(), TxError> {
         info!("claim: BAR0 all-ones after MEM enable - the dGPU is powered off (D3cold); boot with the dGPU as console (hybrid shutdown with both GPUs awake, or MUX in dGPU-only) and re-run");
         return Err(TxError::ENodev);
     }
-    // FEAT_PLM is PL0-LOCKED on Turing (measured: badf5040) - the EALREADY
-    // check is only possible where the register reads. An inaccessible read
-    // (EIO) is treated as "cannot evaluate", not as a failure.
-    match gpu.read32(regs::FEAT_PLM) {
+    // FEAT_PLM EALREADY: family-specific. GA10x/Ada: 0x823804 (AON - the
+    // unlock survives FLR there). Turing: 0x409650, and the unlock does NOT
+    // survive FLR (13th fire) - so a live Turing unlock must be detected and
+    // SKIPPED, never reset over.
+    let feat_plm_addr = if family == "tu10x" { 0x0040_9650 } else { regs::FEAT_PLM };
+    match gpu.read32(feat_plm_addr) {
         Err(TxError::EIO) => info!("claim: FEAT PLM unreadable (Turing-locked) - EALREADY check skipped"),
         Err(e) => return Err(e),
         Ok(plm) => {
             if plm == 0xffff_ffff {
-                info!("claim: EALREADY (FEAT PLM open)");
+                info!("claim: EALREADY (FEAT PLM open at {feat_plm_addr:#010x}) - already unlocked, skip (da96e3f)");
                 return Err(TxError::EAlready);
             }
         }
@@ -529,7 +544,7 @@ pub fn falcon_hs(
     info!("Falcon HS: image={image:#x} code={code_size:#x}@va={code_va:#x} data={data_size:#x}@off={data_off:#x} sig_dmem={sig_dmem:#x} eng={engine_mask:#x} ucode={ucode_id}");
     let code_src = hs_prevalidate(image, code_off, code_size, code_va, code_pa, data_off, data_size, data_pa)?;
     info!("Falcon HS: prevalidate ok (code_src={code_src:#x})");
-    falcon_reset(gpu, base, fbif, falcon2)?;
+    falcon_reset(gpu, base, fbif, falcon2, true)?;
 
     // FBIF: physical addressing mode.
     let mut trans = gpu.read32(fbif + 0x24)?;
@@ -800,6 +815,9 @@ pub struct TxAssets {
     pub stock_sig: alloc::vec::Vec<u8>,
     /// Optional V67 payload (present = four-write unlock; absent = chain replay).
     pub v67: Option<alloc::vec::Vec<u8>>,
+    /// Generic falcon BL (sec2_bl_tu10x.bin, 768B) - Turing FWSEC
+    /// BOOT_WITH_LOADER only; the GA10x/Ada HS path ignores it.
+    pub bl: Option<alloc::vec::Vec<u8>>,
 }
 
 /// Transaction, phases mirror sim::transaction and the C reference:
@@ -843,7 +861,7 @@ pub fn run_transaction(gpu: &TxGpu, assets: &TxAssets, pci_handle: uefi::Handle)
     // settle and re-reads the BSI handoff.
     pre_flr_experiment(pci_handle);
 
-    claim_guards(gpu, true)?;
+    claim_guards(gpu, assets.family, assets.family == "tu10x")?;
 
     // Differential authority map while both engines sit in the as-booted
     // state: localizes the SEC2 start-authority gate before any reset.
@@ -854,12 +872,15 @@ pub fn run_transaction(gpu: &TxGpu, assets: &TxAssets, pci_handle: uefi::Handle)
     // gpu-unlock-ada card through 28e1) boot FWSEC/booter WITHOUT one - and
     // their entry state equals ours (GFW done, BSI handoff=1). Attempt it,
     // log the verdict, proceed either way: whether the chain crosses the
-    // gated state decides the next fix round.
-    match crate::tx_fwsec::scrubber_if_needed(gpu) {
-        Ok(()) => info!("TX: scrubber ok (domains un-gated)"),
-        Err(e) => info!(
+    // gated state decides the next fix round. Turing: the proven cmp50hx
+    // chain has NO scrubber step and the AD10x ucode EIO'd on TU106
+    // (first fire 2026-10-27) - don't fire a foreign binary at it.
+    if assets.family == "tu10x" {
+        info!("TX-tu10x: scrubber step skipped (not part of the proven Turing chain; BSI handoff state logged above)");
+    } else if let Err(e) = crate::tx_fwsec::scrubber_if_needed(gpu) {
+        info!(
             "TX: scrubber did not complete ({e:?}) - proceeding without it (community chain shape)"
-        ),
+        );
     }
 
     let boot_size = assets.gsp_boot.len() as u64;
@@ -868,10 +889,33 @@ pub fn run_transaction(gpu: &TxGpu, assets: &TxAssets, pci_handle: uefi::Handle)
     // sized the gsp region for 36 KiB and wpr_meta_pack then (correctly)
     // refused: 84 MB > boot_offset - gsp_offset (EInval, 2026-10-26 log).
     let gsp_image_size = assets.gsp_image.len() as u64;
-    let layout = crate::tx_fwsec::layout_from_registers(gpu, gsp_image_size, boot_size)?;
+    let layout = crate::tx_fwsec::layout_from_registers(gpu, assets.family, gsp_image_size, boot_size)?;
     info!("TX: layout ok (frts={:#x})", layout.frts_offset);
 
-    crate::tx_fwsec::fwsec_ignite(gpu, &layout)?;
+    if assets.family == "tu10x" {
+        // Turing has no AD10x scrubber step in the proven chain (cmp50hx
+        // runs FWSEC/booter without one), and the AD10x scrubber ucode is a
+        // different binary that EIO'd on TU106 (first fire, 2026-10-27).
+        // WPR2-up entry is the MAINLINE path there (POST or FLR reboot
+        // provisions it): skip the fire instead of refusing.
+        let wpr_hi = gpu.read32(regs::WPR2_HI)?;
+        if wpr_hi >> 4 != 0 {
+            info!(
+                "TX-tu10x: WPR2 already up (hi={wpr_hi:#x}, POST/FLR provisioned) - skipping the FWSEC fire (cmp50hx mainline path)"
+            );
+        } else {
+            let bl = match &assets.bl {
+                Some(b) => b,
+                None => {
+                    info!("TX: tu10x requires \\sec2_bl_tu10x.bin (generic falcon BL) for the WITH_LOADER FWSEC fire");
+                    return Err(TxError::ENodev);
+                }
+            };
+            crate::tx_fwsec::fwsec_ignite_tu10x(gpu, &layout, bl)?;
+        }
+    } else {
+        crate::tx_fwsec::fwsec_ignite(gpu, &layout)?;
+    }
     info!("TX: fwsec ok (WPR2 verified)");
 
     use crate::tx_booter as tb;
@@ -880,7 +924,22 @@ pub fn run_transaction(gpu: &TxGpu, assets: &TxAssets, pci_handle: uefi::Handle)
     // geometry; family comes from the PCI device-id mapping in tx_phase).
     let boot_image_len = assets.gsp_boot.len() as u32;
     let desc = assets.boot_desc.as_ref().ok_or(TxError::EInval)?;
-    let boot = tb::boot_desc_parse(desc, boot_image_len)?;
+    let mut boot = tb::boot_desc_parse(desc, boot_image_len)?;
+    if assets.family == "tu10x" {
+        // cmp50hx-proven BL topology (live-driver WPR meta dump 2026-08-21 +
+        // their proven runs): first 0x6000 bytes of the GspRmBoot image with
+        // code@0x1800 / data@0x800 / manifest@0x0. Our v4-desc 4KB image has
+        // never been consumed by a booter - use the proven input set.
+        if boot_image_len < 0x6000 {
+            info!("TX: tu10x gsp_boot must be the 0x6000-byte proven GspRmBoot image");
+            return Err(TxError::EInval);
+        }
+        boot.image_size = 0x6000;
+        boot.code_offset = 0x1800;
+        boot.data_offset = 0x800;
+        boot.manifest_offset = 0x0;
+        info!("TX: tu10x BL topology pinned: size 0x6000 code@0x1800 data@0x800 manifest@0x0");
+    }
     let (hdr, booter_image, booter_sigs) = tb::load_booter(&assets.booter, assets.family)?;
     info!("TX: booter bundle ok (image {} sigs {})", booter_image.len(), booter_sigs.len());
 
@@ -903,8 +962,18 @@ pub fn run_transaction(gpu: &TxGpu, assets: &TxAssets, pci_handle: uefi::Handle)
         // 0xFA00 > any booter image, EInval).
         core::ptr::copy_nonoverlapping(booter_image.as_ptr(), booter_dma.host, booter_len);
         {
-            let fuse_raw = gpu.read32(0x0082_4140 + (hdr.ucode_id - 1) * 4)?;
-            let fuse_ver = crate::tx_fwsec::fuse_version(fuse_raw);
+            // Turing FUSE registers are PLM-locked at PL0 (badf5040) - and
+            // the Turing BOOT_DIRECT bundle carries exactly ONE signature
+            // (SIG_PROD, 16B AES at patch_loc), so the per-fuse slot
+            // selection is moot; index 0 is the only choice (the community
+            // path patches the literal SIG_PROD bytes likewise). Fourth
+            // TU106 fire failed exactly on this read (2026-10-27).
+            let fuse_ver = if hdr.num_sigs == 1 {
+                0
+            } else {
+                let fuse_raw = gpu.read32(0x0082_4140 + (hdr.ucode_id - 1) * 4)?;
+                crate::tx_fwsec::fuse_version(fuse_raw)
+            };
             info!("TX: booter sig fuse_ver={fuse_ver} (payload_mode={payload_mode})");
             let image = core::slice::from_raw_parts_mut(booter_dma.host, booter_len);
             tb::booter_patch_stock(image, &hdr, booter_sigs, fuse_ver)?;
@@ -923,7 +992,7 @@ pub fn run_transaction(gpu: &TxGpu, assets: &TxAssets, pci_handle: uefi::Handle)
     // WprMeta publication (first signature call) then fire.
     {
         let meta = unsafe { core::slice::from_raw_parts_mut(meta_dma.host, tb::WPR_META_SIZE) };
-        tb::wpr_meta_pack(meta, &layout, 1 << 20,
+        tb::wpr_meta_pack(meta, &layout, assets.family, 1 << 20,
                           sig_dma.dev, sig_size as u64, radix.level0,
                           assets.gsp_image.len() as u64, boot_dma.dev, &boot)?;
     }
@@ -970,7 +1039,7 @@ pub fn run_transaction(gpu: &TxGpu, assets: &TxAssets, pci_handle: uefi::Handle)
         }
         {
             let meta = unsafe { core::slice::from_raw_parts_mut(meta_dma.host, tb::WPR_META_SIZE) };
-            tb::wpr_meta_pack(meta, &layout, 1 << 20,
+            tb::wpr_meta_pack(meta, &layout, assets.family, 1 << 20,
                               VRAM_BASE + OFF_SIG, sig_size as u64, VRAM_BASE + OFF_RADIX,
                               assets.gsp_image.len() as u64, VRAM_BASE + OFF_BOOT, &boot)?;
         }
@@ -1002,7 +1071,14 @@ pub fn run_transaction(gpu: &TxGpu, assets: &TxAssets, pci_handle: uefi::Handle)
 
     // Portal placement needs the HOST pointer to the patched image.
     let booter_view = unsafe { core::slice::from_raw_parts(booter_dma.host, booter_len) };
-    tb::booter_fire(gpu, &hdr, booter_view, meta_addr, vram_fb)?;
+    // Turing boots the booter DIRECT (BOOT_DIRECT, bBootFromHs=FALSE): the
+    // whole image is port-loaded NS+SEC+DMEM with BOOTVEC=0; the GA10x/Ada
+    // BootFromHs path loads only the secure segment through BROM params.
+    if assets.family == "tu10x" {
+        tb::booter_fire_direct(gpu, &hdr, booter_view, meta_addr)?;
+    } else {
+        tb::booter_fire(gpu, &hdr, booter_view, meta_addr, vram_fb)?;
+    }
     if meta_addr != meta_dma.dev {
         let lo = gpu.pci.bar_read_u32(1, meta_addr);
         let hi = gpu.pci.bar_read_u32(1, meta_addr + 4);
@@ -1011,7 +1087,11 @@ pub fn run_transaction(gpu: &TxGpu, assets: &TxAssets, pci_handle: uefi::Handle)
     info!("TX: booter fired");
 
     let meta_view = unsafe { core::slice::from_raw_parts(meta_dma.host, tb::WPR_META_SIZE) };
-    let booter_ok = tb::verify_execution(gpu, payload_mode, meta_view).is_ok();
+    let booter_ok = if assets.family == "tu10x" {
+        tb::verify_execution_tu10x(gpu, payload_mode, meta_view).is_ok()
+    } else {
+        tb::verify_execution(gpu, payload_mode, meta_view).is_ok()
+    };
     if !booter_ok && !force_continue {
         return Err(TxError::EIO);
     }
@@ -1030,9 +1110,36 @@ pub fn run_transaction(gpu: &TxGpu, assets: &TxAssets, pci_handle: uefi::Handle)
 
     if payload_mode {
         if booter_ok {
-            tb::write_selector(gpu, "SS0", 0x0082_381c, tb::SS0_UNLOCK)?;
-            tb::write_selector(gpu, "SS1", 0x0082_3820, tb::SS1_UNLOCK)?;
-            info!("SELECTOR RESULT: SS0={:#x} SS1={:#x}", tb::SS0_UNLOCK, tb::SS1_UNLOCK);
+            // Isolation experiment (\tu10x-no-ss.txt): PLM open ONLY, no SS
+            // writes - separates "PLM open" from "the 0x88888888/0x8 values"
+            // as the Code-43 variable. Turing SS0/SS1 live at 0x409664/6c,
+            // NOT the GA10x/Ada 0x82381c/820 (cmp50hx lines 294-296).
+            let no_ss = assets.family == "tu10x"
+                && crate::tx::read_boot_file("\\tu10x-no-ss.txt").is_some();
+            let (ss0_at, ss1_at) = if assets.family == "tu10x" {
+                (tb::TU10X_FEAT_SS0, tb::TU10X_FEAT_SS1)
+            } else {
+                (0x0082_381c, 0x0082_3820)
+            };
+            if no_ss {
+                info!("SELECTOR RESULT: SS writes SKIPPED (tu10x-no-ss isolation marker) - PLM open only");
+            }
+            if !no_ss {
+                tb::write_selector(gpu, "SS0", ss0_at, tb::SS0_UNLOCK)?;
+                tb::write_selector(gpu, "SS1", ss1_at, tb::SS1_UNLOCK)?;
+                info!("SELECTOR RESULT: SS0={:#x} SS1={:#x}", tb::SS0_UNLOCK, tb::SS1_UNLOCK);
+            }
+            // Turing: with the payload's PLM open, sweep the real FEAT block
+            // - the factory clamp state (open question #10) is readable here
+            // for the first time, BEFORE the FLR wipes the override inputs.
+            if assets.family == "tu10x" {
+                for off in (0x0040_9600..0x0040_9700).step_by(4) {
+                    let v = gpu.pci.bar_read_u32(gpu.bar, off as u64);
+                    if v != 0 {
+                        info!("TU10X FEAT sweep 0x{off:06x} = {v:#010x}");
+                    }
+                }
+            }
             // Stock signature restore BEFORE FLR. In VRAM mode the booter
             // consumed the VRAM copy, so repack with the VRAM stock address
             // and re-publish the page over BAR1.
@@ -1047,26 +1154,71 @@ pub fn run_transaction(gpu: &TxGpu, assets: &TxAssets, pci_handle: uefi::Handle)
                 tb::signature_restore(meta, stock_dma.dev, assets.stock_sig.len() as u64);
                 core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
                 info!("TX: stock signature restored");
+    // TU10x: RE-LOCK the FEAT block PLM before handoff. The 13th/14th fires
+    // proved the Windows Turing driver dies with 0x409650 left at 0xffffffff
+    // (Run A/B), and runs fine with it locked (Run C) - the PLM is only the
+    // WRITE gate; the SS override values are the payload. Open -> write ->
+    // close, then read back: if SS0/SS1 keep the unlock values behind the
+    // re-locked gate, the unlock ships protected; if they revert, the
+    // override is gate-bound and the Turing unlock needs the open state
+    // (which the driver rejects - the CMP references are headless cards
+    // where no display driver ever re-validates this block).
+    if assets.family == "tu10x" && booter_ok {
+        gpu.pci.bar_write_u32(0, 0x0040_9650 as u64, 0xffff_ff8f);
+        let plm_rb = gpu.pci.bar_read_u32(0, 0x0040_9650 as u64);
+        let ss0_rb = gpu.pci.bar_read_u32(0, 0x0040_9664 as u64);
+        let ss1_rb = gpu.pci.bar_read_u32(0, 0x0040_966c as u64);
+        info!(
+            "TU10X PLM relock: plm={plm_rb:#010x} (want 0xffffff8f) SS0={ss0_rb:#010x} SS1={ss1_rb:#010x} unlock_persist={}",
+            ss0_rb == 0x8888_8888 && ss1_rb == 0x8
+        );
+    }
             }
         } else {
             // Probe: the same two writes, but a readback mismatch is the
             // EXPECTED verdict under a locked PLM and must not abort the
             // unwind. No signature restore - the booter never consumed the
             // meta page.
-            let _ = tb::write_selector(gpu, "SS0", 0x0082_381c, tb::SS0_UNLOCK);
-            let _ = tb::write_selector(gpu, "SS1", 0x0082_3820, tb::SS1_UNLOCK);
+            let (ss0_at, ss1_at) = if assets.family == "tu10x" {
+                (tb::TU10X_FEAT_SS0, tb::TU10X_FEAT_SS1)
+            } else {
+                (0x0082_381c, 0x0082_3820)
+            };
+            let _ = tb::write_selector(gpu, "SS0", ss0_at, tb::SS0_UNLOCK);
+            let _ = tb::write_selector(gpu, "SS1", ss1_at, tb::SS1_UNLOCK);
             info!("FORCE-SELECTOR probe done (the selector read lines above carry the verdict)");
         }
     }
 
-    let flr_expect_unlock = payload_mode && booter_ok;
-    tb::flr_phase(gpu, flr_expect_unlock)?;
-    info!("POST-FLR: verified{}", if flr_expect_unlock { " (selectors survive AON)" } else { "" });
+    if assets.family == "tu10x" {
+        // NO FLR on Turing: the FEAT PLM does NOT survive FLR there (13th
+        // fire 2026-10-27: post-FLR plm relocked to 0xffffff8f, unlike Ada
+        // where the AON island holds the unlock across FLR). The booter's
+        // own sanitize (0xdead5ec2) is the cleanup - exactly the cmp50hx
+        // chain shape, which hands the pre-OS state to the OS with zero
+        // Xid and no reset.
+        info!("TX-tu10x: FLR skipped (Turing FEAT PLM does not survive FLR - the unlock ships as-is; booter sanitize was the cleanup)");
+    } else {
+        let flr_expect_unlock = payload_mode && booter_ok;
+        tb::flr_phase(gpu, assets.family, flr_expect_unlock)?;
+        info!("POST-FLR: verified{}", if flr_expect_unlock { " (selectors survive AON)" } else { "" });
+    }
 
     // Restore the display path before handing off (TOTORONG craft): the
     // FLR-rebooted function re-binds its vendor GOP/driver stack. Non-fatal
     // - bootmgfw self-establishes a console regardless.
-    crate::tx_detach::reconnect_all(pci_handle);
+    // Turing: reconnect ON by default. The full 16-fire series + the
+    // GSP-mode Windows closure (2026-10-27) showed the TDRs came from the
+    // LEGACY driver path (EnableGpuFirmware unset), not from the GOP
+    // devinit - with the GSP-mode driver the unlock session is stable, and
+    // the reconnect just restores the boot console earlier (Run A's
+    // shape-change when it was removed turned out to be coincidental).
+    // A \tu10x-no-reconnect.txt marker skips it again for experiments.
+    if assets.family == "tu10x" && crate::tx::read_boot_file("\\tu10x-no-reconnect.txt").is_some() {
+        info!("TX-tu10x: reconnect skipped (tu10x-no-reconnect marker)");
+    } else {
+        crate::tx_detach::reconnect_all(pci_handle);
+    }
 
     // Unwind: release every DMA buffer.
     let _ = booter_dma.release(gpu.pci);
@@ -1166,6 +1318,13 @@ pub fn handoff_out(pci: &crate::pci::PciIo) {
     let (ss0, ss1) = (rd(regs::FEAT_SS0), rd(regs::FEAT_SS1));
     let readout = rd(regs::FEAT_READOUT_1);
     let plm = rd(regs::FEAT_PLM);
+    // Turing's FEAT block lives at 0x4096xx - the GA10x/Ada reads above hit
+    // a different block there, so log the Turing triple too.
+    let (tss0, tss1, tplm) = (
+        rd(crate::tx_booter::TU10X_FEAT_SS0),
+        rd(crate::tx_booter::TU10X_FEAT_SS1),
+        rd(crate::tx_booter::TU10X_FEAT_PLM),
+    );
     let wpr_hi = rd(regs::WPR2_HI);
     let (pmcsr, dstate) = match pci.pm_cap() {
         Some(cap) => {
@@ -1175,7 +1334,8 @@ pub fn handoff_out(pci: &crate::pci::PciIo) {
         None => (0u16, 0xffu16),
     };
     info!(
-        "HANDOFF-OUT: ss0={ss0:#010x} ss1={ss1:#x} readout1={readout:#010x} feat_plm={plm:#010x} wpr2_hi={wpr_hi:#x} pmcsr={pmcsr:#06x} dstate=D{dstate} | ss0_unlock={} ss1_unlock={} plm_open={}",
+        "HANDOFF-OUT: ss0={ss0:#010x} ss1={ss1:#x} readout1={readout:#010x} feat_plm={plm:#010x} wpr2_hi={wpr_hi:#x} pmcsr={pmcsr:#06x} dstate=D{dstate} | tu10x: plm={tplm:#010x} ss0={tss0:#010x} ss1={tss1:#010x} | tu10x_unlock={} ss0_unlock={} ss1_unlock={} plm_open={}",
+        tplm == 0xffff_ffff && tss0 == crate::tx_booter::SS0_UNLOCK && tss1 == crate::tx_booter::SS1_UNLOCK,
         ss0 == crate::tx_booter::SS0_UNLOCK,
         ss1 == crate::tx_booter::SS1_UNLOCK,
         plm == 0xffff_ffff,

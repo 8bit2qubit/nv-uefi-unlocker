@@ -186,13 +186,34 @@ claim(断 GOP/驱动+独占) → scrubber(BSI handoff 1→3) → FWSEC-FRTS(WPR2
 | AD103 | 4080S 2702 / 4080 2704 / 4070TiS 2705 / 4070 2709 / 4090M 2757 | 🟢 上游硅验证 |
 | AD102 | 4090 2684 / 4090D 2685 / 4070TiS 2689 | 🟢 上游硅验证 |
 | GA10x | 3090/3080 2204/2206、3070 系 2484–248c、3060 系 2501/2503–2509/252f/2544、3050 2584、2560、20c2/20f1 | 🟡 上游 kmod 验证，本 EFI 路径无硅证据 |
-| Turing 及更早 | 20 系/16 系/Pascal… | ❌ 无事务轨（Turing 资产已备未启用；Turing 无已知钳制） |
+| **TU106** | **RTX 2070 1f07** | ✅ 实测（2026-10-27，v0.2.0）：全链通过（FWSEC 点火 → BOOT_DIRECT booter → V67 起爆 → PLM 0x409650 全开 → SS0/SS1 写入读回 → 签名还原）；**FP32 累加 36 → 60–63 TFLOPS（+67~75%）**。**前置：Windows 侧 GSP 固件模式（见下节），必须重启生效** |
+| TU102/TU104/TU116（20 系其余/16 系） | 1e02–1e0f、2182–2192 等 | 🟢 同族资产+社区硅验证（2080Ti 22G chenxluo +51~75%、2080Ti 11G nlzy/haohervchb ~1.6×，同链同构） |
+| Turing 及更早（Pascal…） | — | ❌ 无事务轨 |
 | Blackwell (50 系) / GA100 | — | ❌ 链路不同，不在范围 |
 
-**"40 系全部都可以吗？"——AD10x（40 系）理论上全部在列**：同家族资产+上游
-逐硅验证构成高置信预期，但除 28e0 外均未经本 EFI 实测。首次使用建议先跑
-**回放模式**（不放 `v67-*.bin`）：走到 `TX: execution verified` 即链路通，
-再上 payload。
+## Turing（20 系）专属：GSP 固件模式前置（必读）
+
+Turing 的 Windows 驱动**只有在 GSP-RM 固件模式下才接受 pre-OS 解锁状态**；
+legacy 初始化路径撞上打开的 FEAT PLM 会 TDR 风暴/Code 43（40 系/Ada 无此
+要求，v0.1.x 的 40 系用户不受影响）。**运行一次**（管理员 PowerShell）：
+
+```powershell
+tools\windows\enable-turing-unlock.ps1           # 检测 Turing 卡并写 EnableGpuFirmware=1
+tools\windows\enable-turing-unlock.ps1 -Remove   # 回滚到 stock
+```
+
+脚本枚举 `HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-...}\` 下的
+`MatchingDeviceId`，只对 Turing 设备 ID 段（VEN_10DE，0x1E02–0x1FFF 与
+0x2182–0x2192）写 `EnableGpuFirmware=1`。
+
+**必须 Restart（重启）生效，不要依赖休眠恢复**：休眠恢复从休眠镜像还原驱动、
+不重新初始化——GSP 模式不生效，而旧驱动会话遇到解锁态会 TDR。流程：运行
+脚本 → 重启（或直接从重启进 U 盘解锁）→ 直通 Windows 验证。
+
+Turing U 盘根布局在 40 系五件基础上多两件（release 包内齐全）：
+`sec2_bl_tu10x.bin`（768B，WITH_LOADER FWSEC 需要）+ `v67-tu10x-four-plm.bin`
+（64000B）。TU106 出厂钳制实测：SS0 冷值非默认（0x15000/0x11000/0x0 引导间
+漂移）vs 解锁值 0x88888888——"20 系无出厂 segmentation"的旧假设已被修正。
 
 **不兼容/异常时**：请提交 U 盘根的 `\loader.log` 全文到
 [Issues](https://github.com/physicsdolphin/nv-uefi-unlocker/issues)（日志含

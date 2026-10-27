@@ -202,6 +202,19 @@ pub fn load_booter<'a>(bundle: &'a [u8], family: &str) -> Result<(BooterHdr, &'a
 /// prep_610.c gpu_unlock_booter_patch: install the fuse-selected stock
 /// signature into the patch slot (num_sigs-1-fuse_ver indexing).
 pub fn booter_patch_stock(image: &mut [u8], hdr: &BooterHdr, signatures: &[u8], fuse_ver: u32) -> Result<(), TxError> {
+    // Turing BOOT_DIRECT bundles carry exactly ONE signature (SIG_PROD,
+    // 16B AES): there is no fuse-version table to index, so pin index 0.
+    // The num_sigs<2 refusal below is the GA10x/Ada two-slot layout - it
+    // rejected the whole Turing bundle (fifth TU106 fire, 2026-10-27).
+    if hdr.num_sigs == 1 {
+        let sig_size = hdr.sig_bytes as usize;
+        let at = hdr.patch_loc as usize;
+        if at + sig_size > image.len() || sig_size > signatures.len() {
+            return Err(TxError::EInval);
+        }
+        image[at..at + sig_size].copy_from_slice(&signatures[..sig_size]);
+        return Ok(());
+    }
     if hdr.num_sigs < 2 || fuse_ver >= hdr.num_sigs {
         return Err(TxError::ERange);
     }
@@ -279,6 +292,7 @@ pub fn radix_build(gpu: &TxGpu, image: &[u8]) -> Result<RadixBlock, TxError> {
 pub fn wpr_meta_pack(
     meta: &mut [u8],
     layout: &LayoutOut,
+    family: &str,
     frts_size: u64,
     signature_dma: u64,
     signature_size: u64,
@@ -317,12 +331,45 @@ pub fn wpr_meta_pack(
     wr64(meta, 64, boot.manifest_offset as u64);
     wr64(meta, 72, signature_dma);
     wr64(meta, 80, signature_size);
-    wr64(meta, 88, layout.nonwpr_start);
-    wr64(meta, 96, layout.nonwpr_start);
-    wr64(meta, 104, layout.wpr_start - layout.nonwpr_start);
-    wr64(meta, 112, layout.wpr_start);
-    wr64(meta, 120, layout.heap_offset);
-    wr64(meta, 128, layout.gsp_offset - layout.heap_offset);
+    // TU102 heap geometry is driver-EXACT (cmp50hx v2.63/v2.73, from the
+    // live driver's own WPR meta dump on 40HX 8GB: gspFwHeap=0x1f7900000+
+    // 0x6900000): the booter VALIDATES these fields and rejects the whole
+    // meta on mismatch - cleanly, with no signature DMA and no visible
+    // status on BOOT_DIRECT (eighth fire: payload silently no-op'd). The
+    // size is the driver's per-FB constant and must NOT be recomputed from
+    // the aligned offsets (v2.73: the driver keeps a 0xA0000 gap between
+    // heap-end and gspFwOffset; recomputing inflated the heap and broke the
+    // layout). With our gspFwOffset this formula reproduces the driver dump
+    // bit-for-bit: heapOffset = 0x1f7900000.
+    let (nonwpr_off, nonwpr_size, wpr_start, heap_off, heap_size, flags) = if family == "tu10x" {
+        const MB: u64 = 1024 * 1024;
+        let hs = match fb_size {
+            0x280000000 => 0x7F00000, // 10 GiB
+            0x500000000 => 0xFE00000, // 20 GiB
+            _ => 0x6900000,           // 8 GiB (40HX live value)
+        };
+        let ho = (layout.gsp_offset - hs) & !(MB - 1);
+        let ws = ho - MB;
+        info!(
+            "WprMeta tu10x driver-exact heap: off={ho:#x} size={hs:#x} wpr_start={ws:#x} flags=0x1 (deploy marker: driver formula vs 40HX dmesg 0x1f7900000+0x6900000)"
+        );
+        (ws - MB, MB, ws, ho, hs, 0x1u64) // CLOCK_BOOST flag from the live dump
+    } else {
+        (
+            layout.nonwpr_start,
+            layout.wpr_start - layout.nonwpr_start,
+            layout.wpr_start,
+            layout.heap_offset,
+            layout.gsp_offset - layout.heap_offset,
+            0,
+        )
+    };
+    wr64(meta, 88, nonwpr_off); // gspFwRsvdStart
+    wr64(meta, 96, nonwpr_off); // nonWprHeapOffset
+    wr64(meta, 104, nonwpr_size);
+    wr64(meta, 112, wpr_start);
+    wr64(meta, 120, heap_off);
+    wr64(meta, 128, heap_size);
     wr64(meta, 136, layout.gsp_offset);
     wr64(meta, 144, layout.boot_offset);
     wr64(meta, 152, layout.frts_offset);
@@ -331,6 +378,7 @@ pub fn wpr_meta_pack(
     wr64(meta, 176, fb_size);
     wr64(meta, 184, vga_offset);
     wr64(meta, 192, fb_size - vga_offset);
+    meta[241] = flags as u8; // flags (241): 0x1 = GSP_FW_FLAGS_CLOCK_BOOST
     Ok(())
 }
 
@@ -372,7 +420,7 @@ pub fn booter_fire(gpu: &TxGpu, hdr: &BooterHdr, image: &[u8], meta_addr: u64, l
     // Kernel rule: every HS execute is preceded by an engine reset. After a
     // successful scrubber the BSI machine re-locks SEC2's PRI window
     // (post-halt reads go badf5620) - the reset re-opens it.
-    crate::tx::falcon_reset(gpu, SEC2, crate::tx::eng::SEC2_FBIF, crate::tx::eng::SEC2_FALCON2)?;
+    crate::tx::falcon_reset(gpu, SEC2, crate::tx::eng::SEC2_FBIF, crate::tx::eng::SEC2_FALCON2, true)?;
     crate::tx::falcon_dma_unblock(gpu, SEC2, crate::tx::eng::SEC2_FBIF)?;
     if local_fb {
         // VRAM staging: switch the falcon DMA aperture from coherent sysmem
@@ -469,14 +517,29 @@ pub fn booter_fire(gpu: &TxGpu, hdr: &BooterHdr, image: &[u8], meta_addr: u64, l
 /// bootstrap, no DMA: the image is portal-copied into SEC2 IMEM/DMEM
 /// (non-secure part at 0, secure part at ALIGN_UP(ns_size,256), DMEM at 0),
 /// BOOTVEC=0, mailboxes carry the WprMeta address; success = HALT with
-/// mailbox0 == 0. The caller resets SEC2 first.
+/// mailbox0 == 0. Turing BOOT_DIRECT semantics (cmp50hx
+/// booter_load_tu102_direct v60-v62, proven on 40HX/50HX): the wrapper does
+/// the full B-reset itself - falcon_reset (BCR=Falcon on RISC-V-capable
+/// engines), FALCON_RM = chipId0, FBIF unblock - then port-loads. The meta
+/// address is used >4GB as-is (v61: sub-4GB meta reads get LOCKED on Turing
+/// with booter exit 0x91; the driver passes a 64-bit mailbox pair).
 pub fn booter_fire_direct(gpu: &TxGpu, hdr: &BooterHdr, image: &[u8], meta_dma: u64) -> Result<(), TxError> {
     const FALCON_CPUCTL: u32 = 0x100;
     const FALCON_BOOTVEC: u32 = 0x104;
     const FALCON_MAILBOX0: u32 = 0x040;
     const FALCON_MAILBOX1: u32 = 0x044;
-    const CPUCTL_START: u32 = 0x1;
+    // START is BIT 1 (0x2) - NV_PFALCON_FALCON_CPUCTL_STARTCPU_TRUE (cmp50hx
+    // line 353, and the same value the proven fwsec_ignite/booter_fire write).
+    // The stub this replaced carried 0x1: a no-op on the chip, so the booter
+    // NEVER STARTED across attempts 6-9 - the HALT poll passed trivially on
+    // the post-reset halted state and every downstream verdict was vacuous.
+    const CPUCTL_START: u32 = 0x2;
     let base = crate::tx::eng::SEC2;
+
+    crate::tx::falcon_reset(gpu, base, crate::tx::eng::SEC2_FBIF, crate::tx::eng::SEC2_FALCON2, false)?;
+    let chip = gpu.read32(0x0)?; // PMC_BOOT_0
+    gpu.write32(base + 0x084, chip); // FALCON_RM = chipId0
+    crate::tx::falcon_dma_unblock(gpu, base, crate::tx::eng::SEC2_FBIF)?;
 
     let ns = &image[hdr.imem_ns_off as usize..(hdr.imem_ns_off + hdr.imem_ns_size) as usize];
     crate::tx_portal::portal_load_imem(gpu, base, 0, hdr.imem_ns_off, ns, false);
@@ -490,15 +553,85 @@ pub fn booter_fire_direct(gpu: &TxGpu, hdr: &BooterHdr, image: &[u8], meta_dma: 
     gpu.write32(base + FALCON_BOOTVEC, 0);
     gpu.write32(base + FALCON_MAILBOX0, meta_dma as u32);
     gpu.write32(base + FALCON_MAILBOX1, (meta_dma >> 32) as u32);
-    gpu.write32(base + FALCON_CPUCTL, CPUCTL_START);
+    // Alias probe + START-drop probe, mirroring the proven booter_fire: an
+    // ALIAS_EN core must be started through +0x130, and a silently-dropped
+    // START (the AD107M signature) must be caught BEFORE the HALT poll -
+    // which otherwise passes trivially on the still-halted core.
+    let cpuctl_pre = gpu.read32(base + FALCON_CPUCTL)?;
+    if cpuctl_pre & (1 << 6) != 0 {
+        gpu.write32(base + 0x130, 1 << 1);
+    } else {
+        gpu.write32(base + FALCON_CPUCTL, CPUCTL_START);
+    }
+    let imm0 = gpu.pci.bar_read_u32(gpu.bar, (base + FALCON_CPUCTL) as u64);
+    uefi::boot::stall(core::time::Duration::from_millis(5));
+    let imm1 = gpu.pci.bar_read_u32(gpu.bar, (base + FALCON_CPUCTL) as u64);
+    info!("BOOTER-DIRECT start-probe: pre={cpuctl_pre:#010x} imm={imm0:#010x} +5ms={imm1:#010x}");
+    // Mid-run DMEM sampler: the booter's sanitize pass (0xdead5ec2) wipes
+    // every forensic trace before a post-halt read - attempt 11 proved that.
+    // Sample DMEM[0x600] WHILE the core runs: the payload's fill dword
+    // 0x4a7 appearing there is direct evidence the signature DMA landed
+    // (meta accepted); 0xdead5ec2 appearing means sanitize reached it
+    // without a payload landing (meta rejected upstream).
+    let mut dma_landed = false;
+    let mut sanitized = false;
+    for i in 0..4000u32 {
+        gpu.write32(base + 0x1c0, 0x600);
+        let v = gpu.read32(base + 0x1c4)?;
+        gpu.write32(base + 0x1c0, 0);
+        if v == 0x0000_04a7 {
+            info!("BOOTER-DIRECT: *** PAYLOAD LANDED: DMEM[0x600]=0x4a7 at sample {i} ***");
+            dma_landed = true;
+            break;
+        }
+        if v == 0xdead_5ec2 {
+            info!("BOOTER-DIRECT: sanitize reached DMEM[0x600] at sample {i} - no payload landed before it");
+            sanitized = true;
+            break;
+        }
+        let halted = gpu.pci.bar_read_u32(gpu.bar, (base + FALCON_CPUCTL) as u64) & 0x10 != 0;
+        if halted {
+            info!("BOOTER-DIRECT: core halted at sample {i}, DMEM[0x600]={v:#010x}");
+            break;
+        }
+        uefi::boot::stall(core::time::Duration::from_micros(500));
+    }
+    info!("BOOTER-DIRECT: mid-run sampler verdict: dma_landed={dma_landed} sanitized_only={sanitized}");
+    if imm0 == cpuctl_pre && cpuctl_pre & (1 << 6) == 0 {
+        gpu.write32(base + 0x130, 1 << 1);
+        let imm2 = gpu.pci.bar_read_u32(gpu.bar, (base + FALCON_CPUCTL) as u64);
+        info!("BOOTER-DIRECT start-probe: alias retry -> {imm2:#010x}");
+    }
     // Wait for HALT (CPUCTL bit4); read-back of mailbox0 is the verdict.
     gpu.poll_us(base + FALCON_CPUCTL, 0x10, 0x10, 5_000_000, false)
         .or(Err(TxError::ETimeout { tolerated: false }))?;
     let mbox0 = gpu.read32(base + FALCON_MAILBOX0)?;
-    info!("BOOTER-DIRECT: halted, mailbox0={mbox0:#x} (0 = success)");
-    if mbox0 != 0 {
-        return Err(TxError::EIO);
+    let mbox1 = gpu.read32(base + FALCON_MAILBOX1)?;
+    let exci = gpu.read32(base + 0x0d0)?;
+    info!(
+        "BOOTER-DIRECT: halted, mailbox0={mbox0:#x} mailbox1={mbox1:#x} exci={exci:#010x}"
+    );
+    // DMEM forensics - the meta-acceptance discriminator. If the booter
+    // ACCEPTED the meta, it DMA'd sigSize bytes from our signature buffer
+    // to DMEM 0x600: the fill dword 0x4a7 (and the payload's frame values)
+    // must now sit in DMEM. If it REJECTED the meta, those words keep the
+    // booter's own init residue. Read via the same DMEM ports the loader
+    // used, with a per-word offset write (no auto-increment on readback).
+    let dmem_words = [0x600u32, 0x6140, 0xff38, 0xff4c, 0xff50, 0x200];
+    for w in dmem_words {
+        gpu.write32(base + 0x1c0, w);
+        let v = gpu.read32(base + 0x1c4)?;
+        gpu.write32(base + 0x1c0, 0);
+        info!("BOOTER-DIRECT: DMEM[{w:#06x}] = {v:#010x}");
     }
+    info!("BOOTER-DIRECT: DMEM verdict - 0x600=0x4a7 + frames 0x6140 => signature DMA HAPPENED (canary/ROP territory); booter residue => meta still rejected");
+    // Turing BOOT_DIRECT semantics (sixth TU106 fire, 2026-10-27): the
+    // mailboxes are the meta INPUT carrier (kernel passes the 64-bit WprMeta
+    // address in via mailbox0/1) - on halt, mailbox0 keeps the address we
+    // passed. There is no GA10x-style status return here; HALT is the
+    // completion signal and the verdict lands in verify_execution_tu10x
+    // (EXCI + WPR2 + PLM-locked + boot-stage scratch).
+    info!("BOOTER-DIRECT: input-carrier mailboxes are expected on BOOT_DIRECT - verdict deferred to POST-BOOT");
     Ok(())
 }
 
@@ -543,6 +676,14 @@ pub fn verify_execution(gpu: &TxGpu, payload_mode: bool, meta: &[u8]) -> Result<
     let ss0 = gpu.pci.bar_read_u32(gpu.bar, crate::tx::regs::FEAT_SS0 as u64);
     let ss1 = gpu.pci.bar_read_u32(gpu.bar, crate::tx::regs::FEAT_SS1 as u64);
     info!("POST-BOOT: FEAT_PLM={plm:#x} SS0={ss0:#x} SS1={ss1:#x}");
+    // Factory compute-throttle readout, sampled BEFORE the selector writes:
+    // on Turing the FEAT cluster is PL0-locked (open-questions #1), so a
+    // payload-opened PLM is the first readable moment - and once write_selector
+    // runs, FEAT_READOUT_1 reflects our unlock values and the factory state is
+    // gone. Replay mode keeps it as the negative control (expected: still
+    // badf-locked, the stock booter never opens the FEAT PLM).
+    let readout1 = gpu.pci.bar_read_u32(gpu.bar, crate::tx::regs::FEAT_READOUT_1 as u64);
+    info!("POST-BOOT: FACTORY FEAT_READOUT_1={readout1:#010x} (0 = full speed; badf5040 = PLM still closed)");
     let mbox0 = gpu.pci.bar_read_u32(gpu.bar, (crate::tx::eng::SEC2 + 0x40) as u64);
     let wpr_hi = gpu.pci.bar_read_u32(gpu.bar, 0x001f_a828);
     info!("POST-BOOT: SEC2 MAILBOX0={mbox0:#010x} WPR2_HI={wpr_hi:#x}");
@@ -584,13 +725,84 @@ pub fn verify_execution(gpu: &TxGpu, payload_mode: bool, meta: &[u8]) -> Result<
     Ok(())
 }
 
+/// Turing execution verdict. Chain-replay (stock booter): mailbox0 == 0
+/// (kernel s_executeBooterUcode semantics) plus WPR2 still up - the stock
+/// booter never touches the FEAT PLM, so demanding unlock values here would
+/// fail a correct run. Payload mode (TU102 V67): the payload's two writes
+/// are FEAT_PLM=0xffffffff + WPR2_HI=0 plus the ACR mutex-3 release - the
+/// GA10x marker/WPRCFG triad does not exist on Turing; the factory
+/// FEAT_READOUT_1 sample lands right after the PLM check, before any
+/// selector write destroys the factory state.
+/// Turing FEAT block addresses - NOT the GA10x/Ada 0x823xxx block! The
+/// community-proven TU102 payload writes PLM at 0x409650 (cmp50hx lines
+/// 294-296: PLM 0x409650 / SS0 0x409664 / SS1 0x40966c), and our M1 sweep
+/// of 0x823800-0x82382f returning 13/13 badf5040 measured some OTHER
+/// locked block. Attempts 11/12 most likely FIRED (WPR2_HI=0 is payload
+/// write #2's target state) while we verified the wrong register.
+pub const TU10X_FEAT_PLM: u32 = 0x0040_9650;
+pub const TU10X_FEAT_SS0: u32 = 0x0040_9664;
+pub const TU10X_FEAT_SS1: u32 = 0x0040_966c;
+
+pub fn verify_execution_tu10x(gpu: &TxGpu, payload_mode: bool, meta: &[u8]) -> Result<(), TxError> {
+    let plm = gpu.pci.bar_read_u32(gpu.bar, TU10X_FEAT_PLM as u64);
+    let ss0 = gpu.pci.bar_read_u32(gpu.bar, TU10X_FEAT_SS0 as u64);
+    let ss1 = gpu.pci.bar_read_u32(gpu.bar, TU10X_FEAT_SS1 as u64);
+    info!("POST-BOOT: FEAT_PLM={plm:#x} SS0={ss0:#x} SS1={ss1:#x} (Turing 0x4096xx block)");
+    // Factory compute-throttle readout: on Turing this is only readable once
+    // the payload has opened the FEAT PLM (open-questions #1/#10). In replay
+    // mode it stays badf-locked and doubles as the negative control.
+    let readout1 = gpu.pci.bar_read_u32(gpu.bar, crate::tx::regs::FEAT_READOUT_1 as u64);
+    info!("POST-BOOT: FACTORY FEAT_READOUT_1={readout1:#010x} (0 = full speed; badf5040 = PLM still closed)");
+    let mbox0 = gpu.pci.bar_read_u32(gpu.bar, (crate::tx::eng::SEC2 + 0x40) as u64);
+    let wpr_hi = gpu.pci.bar_read_u32(gpu.bar, 0x001f_a828);
+    info!("POST-BOOT: SEC2 MAILBOX0={mbox0:#010x} WPR2_HI={wpr_hi:#x}");
+    if !payload_mode {
+        // Turing BOOT_DIRECT: mailbox0/1 keep the meta INPUT (the address we
+        // passed), not a status - the sixth fire proved mbox0 == meta dev
+        // address on a clean halt. Replay verdict = hard evidence only:
+        // no SEC2 exception, WPR2 still up, PLM still locked; the boot-stage
+        // scratch state is logged for the record.
+        let exci = gpu.pci.bar_read_u32(gpu.bar, (crate::tx::eng::SEC2 + 0x0d0) as u64);
+        let gsp_cpu = gpu.pci.bar_read_u32(gpu.bar, (crate::tx::eng::GSP + 0x100) as u64);
+        let scratch14 = gpu.pci.bar_read_u32(gpu.bar, 0x0011_80f8);
+        let bsi = gpu.pci.bar_read_u32(gpu.bar, 0x0011_80fc);
+        info!(
+            "POST-BOOT: SEC2 EXCI={exci:#010x} GSP_CPUCTL={gsp_cpu:#010x} SCRATCH14={scratch14:#010x} BSI15={bsi:#010x} (pre-chain BSI15=0x202001bf)"
+        );
+        if exci != 0 {
+            info!("POST-BOOT: SEC2 exception during booter run - booter did not complete cleanly");
+            return Err(TxError::EIO);
+        }
+        if wpr_hi >> 4 == 0 {
+            info!("POST-BOOT: WPR2 down after stock boot");
+            return Err(TxError::EIO);
+        }
+        info!("POST-BOOT: replay verdict ok (no exception, WPR2 up, PLM stays locked)");
+        return Ok(());
+    }
+    if plm != 0xffff_ffff {
+        info!("POST-BOOT: PLM still locked - the payload's writes did not happen");
+        wpr_desc_rejected_hint(mbox0, meta);
+        return Err(TxError::EIO);
+    }
+    Ok(())
+}
+
 /// FLR phase (unlock_610.c unlock_transaction_reset, EFI adaptation):
 /// pre-FLR selector verify -> BME clear -> config-space FLR trigger ->
 /// post-FLR GFW/WPR2/selector survival. PCI config via PciIo.
-pub fn flr_phase(gpu: &TxGpu, payload_mode: bool) -> Result<(), TxError> {
-    let ss0 = gpu.read32(crate::tx::regs::FEAT_SS0)?;
-    let ss1 = gpu.read32(crate::tx::regs::FEAT_SS1)?;
-    info!("pre-FLR selectors: ss0={ss0:#x} ss1={ss1:#x}");
+pub fn flr_phase(gpu: &TxGpu, family: &str, payload_mode: bool) -> Result<(), TxError> {
+    // FEAT SS0/SS1 addresses are family-specific (Turing 0x409664/6c vs
+    // GA10x/Ada 0x82381c/20) and PLM-locked at PL0 until a payload opens
+    // the FEAT PLM - in replay the read failing is expected, not an error.
+    let (ss0_at, ss1_at) = if family == "tu10x" {
+        (TU10X_FEAT_SS0, TU10X_FEAT_SS1)
+    } else {
+        (crate::tx::regs::FEAT_SS0, crate::tx::regs::FEAT_SS1)
+    };
+    let ss0 = gpu.read32(ss0_at).unwrap_or(0);
+    let ss1 = gpu.read32(ss1_at).unwrap_or(0);
+    info!("pre-FLR selectors: ss0={ss0:#x} ss1={ss1:#x} (0 = locked, expected in replay)");
     if payload_mode && (ss0 != SS0_UNLOCK || ss1 != SS1_UNLOCK) {
         return Err(TxError::EIO);
     }
@@ -663,9 +875,9 @@ pub fn flr_phase(gpu: &TxGpu, payload_mode: bool) -> Result<(), TxError> {
     if hi >> 4 != 0 {
         return Err(TxError::EIO);
     }
-    let ss0 = gpu.read32(crate::tx::regs::FEAT_SS0)?;
-    let ss1 = gpu.read32(crate::tx::regs::FEAT_SS1)?;
-    info!("POST-FLR selectors: ss0={ss0:#x} ss1={ss1:#x}");
+    let ss0 = gpu.read32(ss0_at).unwrap_or(0);
+    let ss1 = gpu.read32(ss1_at).unwrap_or(0);
+    info!("POST-FLR selectors: ss0={ss0:#x} ss1={ss1:#x} (0 = locked, expected in replay)");
     if payload_mode && (ss0 != SS0_UNLOCK || ss1 != SS1_UNLOCK) {
         return Err(TxError::EIO); // AON survival violated
     }

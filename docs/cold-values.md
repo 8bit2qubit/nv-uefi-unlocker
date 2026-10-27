@@ -20,7 +20,8 @@
 | FBPA_PLM 0x9a0148 | 0xffffffcf | 可读，值异于 AD107 |
 | AD1xx 名义寄存器 CYA/CFG/BAR1_CAP | 0x8 / 0x2 / 0x1c00 | Turing 上地址语义未核实，仅记录（跨族地址采样噪声） |
 | NV_PROM 64K | crc32 0x552e185c | 本卡身份 |
-| post-FLR GFW_BOOT | 0x101 卡住 | 与 AD107 一致（跨代 FLR 行为）
+| post-FLR GFW_BOOT | 0x101 卡住 | 与 AD107 一致（跨代 FLR 行为） |
+| PSTRAPS SET0 0x101000 / SET1 0x10100c | **0x00400080 / 0x02013000（2026-10-27 实测，均可读）** | 按 SET0[15:14]+SET1[22:20] 和值解码 = **0 → 64MiB，override_en=0**——与运行时 BAR1（2070 标称 256MiB）不符。解读：这是 ROM 加载的**原始 straps 默认值**；NvStrapsReBar 在**枚举期（devinit 之前）**改写才生效，而我们的 app 在 GOP/devinit 之后采样，运行时的 256MiB 由 devinit 自行编程（或采样 straps 后按 VBIOS 表覆盖）。BAR0 索引 0（16MiB ✓ 与 BAR0 base 0xde000000 的 16MB 窗口一致）、BAR3=2×BAR0。**待办**：Windows 侧 `nvidia-smi -q` 的 BAR1 Memory Usage 实证运行时孔径；若做 straps 写实验须确认 devinit 时机 |
 
 ## GA106（RTX 3060，10de:2504）——未采样
 

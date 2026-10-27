@@ -171,7 +171,7 @@ impl FakeGpu {
         }
 
         // GSP start (FWSEC BOOT_WITH_LOADER analog): install WPR2.
-        if off == regs::GFW_CPUCTL && v & 1 != 0 {
+        if off == regs::GFW_CPUCTL && v & 2 != 0 { // START = bit 1 (real chip)
             if let Some((lo, hi)) = self.fwsec_wpr {
                 self.w32(regs::WPR2_LO, lo);
                 self.w32(regs::WPR2_HI, hi);
@@ -181,7 +181,7 @@ impl FakeGpu {
 
         // SEC2 start: the payload effect. Full mode = payload executed:
         // marker path ends with SEC2 HALTED and the PLM opened (triad).
-        if off == regs::SEC2_CPUCTL && v & 1 != 0 {
+        if off == regs::SEC2_CPUCTL && v & 2 != 0 { // START = bit 1 (real chip)
             match self.boot_mode {
                 BootMode::Full => {
                     self.w32(regs::FEAT_PLM, 0xffff_ffff);

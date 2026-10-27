@@ -70,6 +70,9 @@ impl PhaseError {
 pub struct Transaction<'a> {
     pub gpu: &'a mut FakeGpu,
     pub faults: Faults,
+    /// false = chain-replay (stock booter, PLM stays locked, no selector
+    /// writes, no signature restore).
+    pub payload: bool,
     // bookkeeping (unwind contract)
     dma_live: usize,
     dma_allocs: usize,
@@ -84,12 +87,25 @@ impl<'a> Transaction<'a> {
         Self {
             gpu,
             faults,
+            payload: true,
             dma_live: 0,
             dma_allocs: 0,
             dma_frees: 0,
             bme_set: false,
             bme_was_dirty: false,
             log: Vec::new(),
+        }
+    }
+
+    /// Chain-replay mode (Turing M3 shape, and the GA10x replay): a STOCK
+    /// booter with no payload. The verdict is mailbox0 == 0 + HALT + WPR2
+    /// still up; the FEAT PLM stays LOCKED (the stock booter never opens
+    /// it), selectors are never written, and there is no payload signature
+    /// to restore before the FLR.
+    pub fn new_replay(gpu: &'a mut FakeGpu, faults: Faults) -> Self {
+        Self {
+            payload: false,
+            ..Self::new(gpu, faults)
         }
     }
 
@@ -152,7 +168,7 @@ impl<'a> Transaction<'a> {
             want
         };
         self.gpu.fwsec_wpr = Some(install);
-        self.gpu.write(regs::GFW_CPUCTL, 1);
+        self.gpu.write(regs::GFW_CPUCTL, 1 << 1); // START = bit 1 (real chip)
         let lo = self.gpu.read(regs::WPR2_LO);
         let hi = self.gpu.read(regs::WPR2_HI);
         if (lo, hi) != want {
@@ -169,11 +185,15 @@ impl<'a> Transaction<'a> {
     /// failure — read-backs decide (task brief §7.4).
     fn booter_fire_and_verify(&mut self) -> Result<(), PhaseError> {
         self.alloc_dma_page()?; // signature DMA
-        // BCR switch check (RISC-V <-> Falcon handover interface present).
-        self.gpu.write(SEC2_BCR, 1);
-        let bcr = self.gpu.read(SEC2_BCR);
-        if self.faults.switch_stuck || bcr == 0 {
-            return Err(PhaseError::new("booter", "BCR switch stuck at 0"));
+        // BCR switch check (RISC-V <-> Falcon handover interface present) -
+        // payload path only: Turing BOOT_DIRECT keeps the Falcon core, no
+        // switch exists on that path.
+        if self.payload {
+            self.gpu.write(SEC2_BCR, 1);
+            let bcr = self.gpu.read(SEC2_BCR);
+            if self.faults.switch_stuck || bcr == 0 {
+                return Err(PhaseError::new("booter", "BCR switch stuck at 0"));
+            }
         }
         // Reset SEC2 with propagation semantics; assert then wait.
         self.gpu.write(regs::SEC2_RESET, 1);
@@ -185,8 +205,47 @@ impl<'a> Transaction<'a> {
         if self.gpu.read(regs::SEC2_RESET) & 1 == 0 {
             return Err(PhaseError::new("booter", "reset never propagated"));
         }
-        // Fire.
-        self.gpu.write(regs::SEC2_CPUCTL, 1);
+        // Fire. Replay uses the stock-booter behavior (Halt mode: SEC2
+        // halts, nothing else written) - Full mode would model the payload
+        // opening the PLM, which a stock boot never does.
+        if !self.payload {
+            self.gpu.boot_mode = crate::BootMode::Halt;
+        }
+        self.gpu.write(regs::SEC2_CPUCTL, 1 << 1); // START = bit 1 (real chip)
+        if !self.payload {
+            // Replay verdict: the stock booter halts with mailbox0 == 0
+            // (nonzero = its own error status; 0x89-0x90 = WprMeta rejected
+            // on DMA readback), WPR2 stays up, and the PLM must remain
+            // locked - a replay that opened the PLM would mean something
+            // ELSE wrote it, which is exactly what the guard exists for.
+            let status = if self.faults.marker_missing { 0x89 } else { 0 };
+            self.gpu.force_write(SEC2_MAILBOX0, status);
+            if self.faults.halt_not_set {
+                self.gpu.force_write(regs::SEC2_CPUCTL, 0); // still running
+            } else {
+                self.gpu.force_write(regs::SEC2_CPUCTL, regs::CPUCTL_HALTED);
+            }
+            let mbox0 = self.gpu.read(SEC2_MAILBOX0);
+            let halt = self.gpu.read(regs::SEC2_CPUCTL) & 0x10 != 0;
+            let plm = self.gpu.read(regs::FEAT_PLM);
+            let wpr_hi = self.gpu.read(regs::WPR2_HI);
+            if mbox0 != 0 {
+                return Err(PhaseError::new("verify", format!(
+                    "replay booter status {mbox0:#x} (nonzero = failed)"
+                )));
+            }
+            if !halt {
+                return Err(PhaseError::new("verify", "replay: SEC2 never halted"));
+            }
+            if wpr_hi >> 4 == 0 {
+                return Err(PhaseError::new("verify", "replay: WPR2 down after stock boot"));
+            }
+            if plm == 0xffff_ffff {
+                return Err(PhaseError::new("verify", "replay: PLM opened by a stock boot (unexpected)"));
+            }
+            self.note("replay verified (mbox0=0 + HALT + WPR2 up, PLM stays locked)");
+            return Ok(());
+        }
         // Execution evidence: marker into mailbox 0, HALT in CPUCTL, PLM open.
         if !self.faults.marker_missing {
             self.gpu.force_write(SEC2_MAILBOX0, MARKER_OK);
@@ -254,8 +313,9 @@ impl<'a> Transaction<'a> {
         if lo != 0 || hi != 0 {
             return Err(PhaseError::new("post_flr", format!("alien WPR2 {lo:#x}/{hi:#x}")));
         }
-        // Selectors survive FLR (FEAT island is AON — task brief §3.2).
-        if self.gpu.read(regs::FEAT_SS0) != 0x8888_8888 {
+        // Selectors survive FLR (FEAT island is AON — task brief §3.2);
+        // replay never wrote them, so the check is payload-only.
+        if self.payload && self.gpu.read(regs::FEAT_SS0) != 0x8888_8888 {
             return Err(PhaseError::new("post_flr", "SS0 lost after FLR (expected AON survival)"));
         }
         self.note("post-FLR verified");
@@ -284,8 +344,10 @@ impl<'a> Transaction<'a> {
             self.gfw_wait()?;
             self.fwsec()?;
             self.booter_fire_and_verify()?;
-            self.selectors()?;
-            self.signature_restore()?;
+            if self.payload {
+                self.selectors()?;
+                self.signature_restore()?;
+            }
             self.flr_and_post()?;
             Ok(())
         })();
@@ -295,13 +357,15 @@ impl<'a> Transaction<'a> {
             dma_pages_freed: self.dma_frees,
             fwsec_fired: true,
             booter_fired: true,
-            marker_seen: !self.faults.marker_missing,
+            marker_seen: self.payload && !self.faults.marker_missing,
             halt_seen: !self.faults.halt_not_set,
-            plm_open_verified: !self.faults.marker_missing && !self.faults.halt_not_set,
-            selectors_written: true,
+            plm_open_verified: self.payload
+                && !self.faults.marker_missing
+                && !self.faults.halt_not_set,
+            selectors_written: self.payload,
             bme_restored: !self.bme_set,
             flr_done: !self.faults.fail_flr,
-            signature_restored: !self.faults.signature_restore_fail,
+            signature_restored: !self.payload || !self.faults.signature_restore_fail,
             unwind_clean: self.dma_live == 0 && !self.bme_set,
         })
     }

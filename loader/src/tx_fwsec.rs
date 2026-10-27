@@ -27,6 +27,8 @@ pub struct FwsecInfo {
     pub sig_versions: u32,  // slot bitmap
     pub sig_off: u32,       // signature area within the ROM (desc + 44)
     pub interface_off: u32, // FRTS interface block offset in DMEM
+    pub imem_sec_base: u32, // V2 NS/SEC split: secure segment IMEM base (0 on V3)
+    pub imem_sec_size: u32, // V2 secure segment size (0 on V3)
 }
 
 fn le16(d: &[u8], o: usize) -> u16 {
@@ -135,32 +137,40 @@ fn prom_find_ucode(rom: &[u8], want_app: u8) -> Option<FwsecInfo> {
                 continue; // non-FWSEC entries only parsed in V3 (scrubber 0x49)
             }
             if ver == 2 {
-                // Turing V2 (60B, BOOT_WITH_LOADER). NVOC-measured TU106:
-                // IMEM load 0x9600 = sec_base 0x300 + sec_size 0x9300,
-                // stored 0x9a10 = IMEM 0x9600 + DMEM 0x410.
+                // Turing V2 (60B, BOOT_WITH_LOADER). Field offsets per the
+                // community-proven TU106/TU102 measurements (cmp50hx
+                // unlock50x v68: iface@0x10, imemLoad@0x18, imemSecBase@0x20,
+                // imemSecSize@0x24, dmemLoad@0x30, dmemOff@0x34; task brief
+                // §7.3 "InterfaceOffset 插在@16，IMEMSecBase@32/36").
+                // NVOC TU106 self-check: stored 0x9a10 = imemLoad 0x9600 +
+                // dmem 0x410. The old parse here read iface@12/imem@20/32 —
+                // those are VirtualEntry/IMEMPhys/IMEMSecBase, wrong slots.
                 if size < 60 || desc_off + 60 > rom.len() {
                     return None;
                 }
                 let stored = le32(rom, desc_off + 4);
-                let interface = le32(rom, desc_off + 12);
-                let imem_load = le32(rom, desc_off + 20);
-                let dmem_load = le32(rom, desc_off + 32);
+                let sec_base = le32(rom, desc_off + 32);
+                let sec_size = le32(rom, desc_off + 36);
+                let dmem_load = le32(rom, desc_off + 48);
+                let dmem_off_img = le32(rom, desc_off + 52);
                 return Some(FwsecInfo {
                     image_off: desc_off as u32 + size,
                     image_size: (stored + 255) & !255,
                     stored_size: stored,
-                    imem_pa: 0,
-                    imem_size: imem_load,
+                    imem_pa: le32(rom, desc_off + 20),
+                    imem_size: le32(rom, desc_off + 24),
                     imem_va: le32(rom, desc_off + 24),
                     dmem_pa: 0,
                     dmem_size: dmem_load,
-                    data_off: imem_load,
+                    data_off: dmem_off_img,
                     pkc_off: le32(rom, desc_off + 8),
                     engine_mask: 0x400,
                     ucode_id: 9,
                     sig_versions: 0,
                     sig_off: desc_off as u32 + 44,
-                    interface_off: interface,
+                    interface_off: le32(rom, desc_off + 16),
+                    imem_sec_base: sec_base,
+                    imem_sec_size: sec_size,
                 });
             }
             if ver != 3 || size < 44 || desc_off + 44 > rom.len() {
@@ -194,6 +204,8 @@ fn prom_find_ucode(rom: &[u8], want_app: u8) -> Option<FwsecInfo> {
                 sig_versions: le16(rom, desc_off + 40) as u32,
                 sig_off: desc_off as u32 + 44,
                 interface_off: le32(rom, desc_off + 12),
+                imem_sec_base: 0,
+                imem_sec_size: 0,
             });
         }
     }
@@ -298,6 +310,7 @@ pub struct LayoutOut {
 
 pub fn layout_from_registers(
     gpu: &TxGpu,
+    family: &str,
     image_size: u64,
     boot_size: u64,
 ) -> Result<LayoutOut, TxError> {
@@ -311,11 +324,48 @@ pub fn layout_from_registers(
     info!(
         "layout inputs: fb_mib={fb_raw:#010x} vga={vga_raw:#010x} mmu_plm={plm_raw:#010x} mmu_lo={lo_raw:#010x} mmu_hi={hi_raw:#010x} image={image_size:#x} boot={boot_size:#x}"
     );
-    if inaccessible(fb_raw) || inaccessible(plm_raw) || inaccessible(lo_raw) || inaccessible(hi_raw)
-    {
+    // FB_SIZE_MIB is PLM-LOCKED at PL0 on Turing (measured 2026-10-26/27:
+    // badf5040, unlike Ada where it reads) - first fire failed exactly here.
+    // The community-proven path (cmp50hx detect_fb_size) derives geometry
+    // from the SKU instead: 10de:1f07 (RTX 2070, TU106) has 8 GiB.
+    let fb_mib = if inaccessible(fb_raw) {
+        if family == "tu10x" {
+            const FB_MIB_TU106_1F07: u32 = 8192;
+            info!(
+                "layout: FB_SIZE_MIB PLM-locked on Turing ({fb_raw:#010x}) - using SKU geometry 8192 MiB (10de:1f07); refuse and extend the table for other TU106 SKUs"
+            );
+            FB_MIB_TU106_1F07
+        } else {
+            return Err(TxError::EIO);
+        }
+    } else {
+        fb_raw
+    };
+    if inaccessible(lo_raw) || inaccessible(hi_raw) {
         return Err(TxError::EIO);
     }
-    let fb_mib = fb_raw;
+    // MMU_PLM is PLM-locked at PL0 on Turing too (second TU106 fire,
+    // 2026-10-27: badf5040). It only feeds the bit0 lock-bit sanity check -
+    // the actual layout input is the lo/hi lock window, which reads fine
+    // and is bit-identical to the AD107M values the M4 chain verified
+    // end-to-end. Skip the check where the register is hidden.
+    let (plm, plm_check) = if inaccessible(plm_raw) {
+        if family == "tu10x" {
+            info!(
+                "layout: MMU_PLM PLM-locked on Turing ({plm_raw:#010x}) - skipping the lock-bit sanity check (lo/hi window remains the layout input)"
+            );
+            (0u32, false)
+        } else {
+            return Err(TxError::EIO);
+        }
+    } else {
+        (plm_raw, true)
+    };
+    let lo = lo_raw;
+    let hi = hi_raw;
+    if fb_mib == 0 || fb_mib == !0u32 || (plm_check && plm & 1 == 0) {
+        return Err(TxError::ENodev);
+    }
     // The VGA workspace pointer is the one layout input a poison value is
     // tolerable for: only bit3 decides, and bit3=0 (also the value on a
     // healthy card) means "no workspace pointer, reserve the FB top 1 MiB".
@@ -331,12 +381,6 @@ pub fn layout_from_registers(
     } else {
         vga_raw
     };
-    let plm = plm_raw;
-    let lo = lo_raw;
-    let hi = hi_raw;
-    if fb_mib == 0 || fb_mib == !0u32 || plm & 1 == 0 {
-        return Err(TxError::ENodev);
-    }
     let usable_fb = (fb_mib as u64) << 20;
     if usable_fb < 256 << 20 {
         info!("layout rejected: usable FB below 256 MiB");
@@ -468,7 +512,7 @@ pub fn fwsec_ignite(gpu: &TxGpu, layout: &LayoutOut) -> Result<(), TxError> {
     // is proven on both engines; everything after placement (BROM PKC
     // params, BOOTVEC, start, HALT) matches the kernel HS sequence.
     const GSP_SEC: u32 = 1 << 28;
-    crate::tx::falcon_reset(gpu, GSP_BASE, GSP_FBIF, GSP_FALCON2)?;
+    crate::tx::falcon_reset(gpu, GSP_BASE, GSP_FBIF, GSP_FALCON2, true)?;
     crate::tx::falcon_dma_unblock(gpu, GSP_BASE, GSP_FBIF)?;
     crate::tx::falcon_authority_probe(gpu, GSP_BASE, "GSP");
     let image = unsafe { core::slice::from_raw_parts(dma.host, fw.image_size as usize) };
@@ -551,6 +595,182 @@ const _: () = {
     let _: Option<&PciIo> = None;
 };
 
+/// Turing FWSEC ignition (BOOT_WITH_LOADER). Port of cmp50hx-unlock
+/// efi-unlock fwsec_boot_gsp_50hx (v66-v70 lineage): proven on TU106 40HX
+/// (v66 real-machine measurements) and TU102 50HX (2026-09-10 live A/B).
+/// Differences from the GA10x/Ada HS path above:
+/// - FWSEC is a WITH_LOADER-type ucode (kernel_gsp_fwsec.c:741). Host
+///   writes/DMA into SECURE IMEM are scrubbed - disproven on card across
+///   v66-v69. A generic falcon BL (768B, g_bindata_ksec2GetBinArchiveBlUcode
+///   _TU102, works for SEC2 and GSP) runs at the top of GSP IMEM and DMAs
+///   the secure code from the host buffer inside secure context.
+/// - The V2 image is NS+SEC split: NS [0..sec_base) -> IMEM 0 unsecured,
+///   SEC [sec_base..+sec_size) -> IMEM sec_base secured (driver
+///   s_imemCopyTo_TU102 semantics; tags = address>>8).
+/// - No BROM PKC params (WITH_LOADER has no PARAADDR/ENGIDMASK semantics);
+///   BOOTVEC = the BL start tag << 8 (blStartTag 0xfd -> 0xfd00).
+/// - FBIF TRANSCFG0/4 = 0x15 (COHERENT_SYSMEM | PHYSICAL). v1.52 lesson:
+///   bare 0x5 leaves MEM_TYPE virtual and the BL DMA never completes.
+/// - Signature rides inside the blob data segment (prod bytes); the
+///   explicit per-fuse sig placement of the V3 path does not apply.
+pub fn fwsec_ignite_tu10x(gpu: &TxGpu, layout: &LayoutOut, bl: &[u8]) -> Result<(), TxError> {
+    const GSP: u32 = 0x0011_0000;
+    const FALCON2: u32 = 0x0011_1000;
+    const BL_START_TAG: u32 = 0xfd;
+    const BL_CODE_SIZE: usize = 0x200; // blImgHeader.blCodeSize (768B blob = 0x200 code + 0x100 data)
+    if bl.len() < BL_CODE_SIZE {
+        info!("FWSEC-TU10X: sec2 BL blob too small ({} bytes)", bl.len());
+        return Err(TxError::EInval);
+    }
+    let bsi = gpu.pci.bar_read_u32(gpu.bar, 0x0011_80fc);
+    info!("FWSEC-TU10X: BSI_SCRATCH15={bsi:#010x} handoff={} (DONE=3)", bsi >> 29 & 7);
+
+    info!("FWSEC-TU10X: reading PROM at {:#x}", 0x300000);
+    let mapped = 1024 * 1024usize;
+    let mut rom_words = alloc::vec![0u32; mapped / 4];
+    let st = gpu.pci.bar_read_u32_buf(gpu.bar, 0x300000, rom_words.as_mut());
+    if st != uefi::Status::SUCCESS {
+        info!("FWSEC-TU10X: PROM bulk read failed {:?}", st);
+        return Err(TxError::ENodev);
+    }
+    let rom: &[u8] = unsafe { core::slice::from_raw_parts(rom_words.as_ptr() as *const u8, mapped) };
+    let fw = match prom_find_fwsec(&rom, false) {
+        Some(f) => f,
+        None => { info!("FWSEC-TU10X: PROM parse found no FWSEC_PROD (V2/V3)"); return Err(TxError::ENodev); }
+    };
+    if fw.engine_mask != 0x400 {
+        info!("FWSEC-TU10X: unsupported engine mask={:#x}", fw.engine_mask);
+        return Err(TxError::ENodev);
+    }
+    if fw.imem_sec_base == 0 || fw.imem_sec_size == 0
+        || fw.imem_sec_base + fw.imem_sec_size != fw.imem_size {
+        info!(
+            "FWSEC-TU10X: unexpected V2 split (sec {:#x}+{:#x} != imem {:#x}) - NS+SEC load cannot proceed",
+            fw.imem_sec_base, fw.imem_sec_size, fw.imem_size
+        );
+        return Err(TxError::EInval);
+    }
+    info!(
+        "FWSEC-TU10X: imem ns 0..{:#x} + sec {:#x}+{:#x} dmem {:#x} @img {:#x} iface@{:#x} stored={:#x}",
+        fw.imem_sec_base, fw.imem_sec_base, fw.imem_sec_size,
+        fw.dmem_size, fw.data_off, fw.interface_off, fw.stored_size
+    );
+
+    let mut dma = gpu.pci.dma_alloc(fw.image_size as usize).map_err(|_| TxError::ENodev)?;
+    unsafe {
+        core::ptr::write_bytes(dma.host, 0, fw.image_size as usize);
+        core::ptr::copy_nonoverlapping(
+            rom.as_ptr().add(fw.image_off as usize),
+            dma.host,
+            fw.stored_size as usize,
+        );
+    }
+    {
+        let image = unsafe { core::slice::from_raw_parts_mut(dma.host, fw.image_size as usize) };
+        // V2 mapper walk: iface -> DMEMMAPPER(id4) -> cmd_in; writes
+        // readVbiosDesc{1,24,0,0,0,2} + frtsRegionDesc{1,20,frts>>12,0x100,2}
+        // and mapper.init_cmd = 0x15 (FRTS) - same cmd shape the 50HX port
+        // hand-writes at its 0x360/0x3b0 constants.
+        fwsec_patch_frts(image, &fw, layout.frts_offset)?;
+    }
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+    // 1. GSP reset, Turing order (50HX): IRQMSET=0 -> reset/scrub/BCR=Falcon
+    //    (falcon_reset; TU106 GSP is RISC-V so the BCR forces Falcon) ->
+    //    FALCON_RM = chipId0 (PMC_BOOT_0: TU102 0x162000A1 / TU106 0x166000A1).
+    gpu.write32(GSP + 0x080, 0); // IRQMSET=0 (50HX E1-trace step)
+    crate::tx::falcon_reset(gpu, GSP, GSP + 0x600, FALCON2, false)?;
+    let chip = gpu.read32(0x0)?; // PMC_BOOT_0
+    gpu.write32(GSP + 0x084, chip); // FALCON_RM
+    let rm_rb = gpu.pci.bar_read_u32(gpu.bar, (GSP + 0x084) as u64);
+    let cpuctl = gpu.pci.bar_read_u32(gpu.bar, (GSP + 0x100) as u64);
+    info!("FWSEC-TU10X: GSP reset done: rm={rm_rb:#010x} cpuctl={cpuctl:#010x} chip={chip:#010x}");
+    if cpuctl & 0xBADF_0000 != 0 {
+        info!("FWSEC-TU10X: GSP locked (BADF) after reset");
+        return Err(TxError::EIO);
+    }
+
+    // 2. FBIF for the BL host-DMA aperture (ctxDma=4 baked into the BL).
+    let ctl = gpu.read32(GSP + 0x624)?;
+    gpu.write32(GSP + 0x624, ctl | 1 << 7); // FBIF_CTL DISABLE_CTX_REQ
+    gpu.write32(GSP + 0x10C, 0); // DMACTL
+    gpu.write32(GSP + 0x600, 0x15); // TRANSCFG0 = COHERENT_SYSMEM|PHYSICAL
+    gpu.write32(GSP + 0x610, 0x15); // TRANSCFG4 (the BL's ctxDma index)
+    let t4 = gpu.read32(GSP + 0x610)?;
+    info!("FWSEC-TU10X: FBIF trans4={t4:#010x} (want 0x15) dmactl cleared");
+
+    // 3. BL DESC (RM_FLCN_BL_DMEM_DESC, 0x54 bytes) -> DMEM 0.
+    let mut desc = [0u8; 0x54];
+    let put32 = |d: &mut [u8], off: usize, v: u32| d[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    let data_phys = dma.dev + fw.data_off as u64;
+    put32(&mut desc, 0x20, 4); // ctxDma (TRANSCFG index 4)
+    put32(&mut desc, 0x24, dma.dev as u32); // codeDma lo
+    put32(&mut desc, 0x28, (dma.dev >> 32) as u32); // codeDma hi
+    put32(&mut desc, 0x2C, 0); // nsOff (imemNsPa)
+    put32(&mut desc, 0x30, fw.imem_sec_base); // nsSize
+    put32(&mut desc, 0x34, fw.imem_sec_base); // secOff (imemSecPa)
+    put32(&mut desc, 0x38, fw.imem_sec_size); // secSize
+    put32(&mut desc, 0x3C, 0); // codeEntryPoint (IMEM 0)
+    put32(&mut desc, 0x40, data_phys as u32); // dataDma lo
+    put32(&mut desc, 0x44, (data_phys >> 32) as u32); // dataDma hi
+    put32(&mut desc, 0x48, fw.dmem_size); // dataSize
+    crate::tx_portal::portal_load_dmem(gpu, GSP, 0, &desc);
+
+    // 4. BL code -> IMEM top (s_setupLoader: dst block = IMEM blocks - code
+    // blocks), tags from blStartTag 0xfd; the BL starts at its LINK address
+    // 0xfd00 regardless of the write destination.
+    let imem_blocks = gpu.read32(GSP + 0x108)? & 0x1ff;
+    if (imem_blocks as usize) * 256 < BL_CODE_SIZE {
+        info!("FWSEC-TU10X: IMEM too small for BL ({imem_blocks} blocks)");
+        return Err(TxError::EInval);
+    }
+    let bl_dst = ((imem_blocks - (BL_CODE_SIZE / 256) as u32) << 8) as u32;
+    let bl_vec = BL_START_TAG << 8;
+    info!(
+        "FWSEC-TU10X: BL at IMEM dst={bl_dst:#x} (hwcfg {imem_blocks} blocks), BOOTVEC={bl_vec:#x}{}",
+        if bl_dst == bl_vec { "" } else { "  <== dst != 0xfd00 (50HX saw 0xfd00 on TU102/TU106)" }
+    );
+    crate::tx_portal::portal_load_imem(gpu, GSP, bl_dst, bl_vec, &bl[..BL_CODE_SIZE], false);
+
+    // 5. BOOTVEC + STARTCPU (alias path when the card exposes it, same
+    // probe as the HS fire above), then poll WPR2 - FWSEC-with-loader is
+    // verdicted by the FRTS result, not by an early HALT.
+    gpu.write32(GSP + 0x104, bl_vec);
+    let cpuctl_pre = gpu.pci.bar_read_u32(gpu.bar, (GSP + 0x100) as u64);
+    if cpuctl_pre & (1 << 6) != 0 {
+        gpu.write32(GSP + 0x130, 1 << 1);
+    } else {
+        gpu.write32(GSP + 0x100, 1 << 1);
+    }
+    info!("FWSEC-TU10X: STARTCPU, polling WPR2 up (5s budget)...");
+    let mut up = false;
+    let (mut wpr_lo, mut wpr_hi) = (0u32, 0u32);
+    for i in 0..5000u32 {
+        wpr_lo = gpu.pci.bar_read_u32(gpu.bar, 0x001f_a824);
+        wpr_hi = gpu.pci.bar_read_u32(gpu.bar, 0x001f_a828);
+        if (wpr_hi >> 4) != 0 && ((wpr_lo >> 4) as u64 == layout.frts_offset >> 12) {
+            info!("FWSEC-TU10X: *** WPR2 UP lo={wpr_lo:#x} hi={wpr_hi:#x} after {}ms ***", i);
+            up = true;
+            break;
+        }
+        uefi::boot::stall(core::time::Duration::from_millis(1));
+    }
+    if !up {
+        let cpuctl = gpu.pci.bar_read_u32(gpu.bar, (GSP + 0x100) as u64);
+        let exci = gpu.pci.bar_read_u32(gpu.bar, (GSP + 0x0d0) as u64);
+        let mbox0 = gpu.pci.bar_read_u32(gpu.bar, (GSP + 0x40) as u64);
+        let scratch = gpu.read32(0x1400 + 0x0e * 4).unwrap_or(0);
+        info!(
+            "FWSEC-TU10X: WPR2 never came up - lo={wpr_lo:#x} hi={wpr_hi:#x} CPUCTL={cpuctl:#010x} EXCI={exci:#010x} MAILBOX0={mbox0:#010x} scratch={scratch:#010x}"
+        );
+        let _ = dma.release(gpu.pci);
+        return Err(TxError::EIO);
+    }
+    let _ = dma.release(gpu.pci);
+    info!("FWSEC-TU10X: WPR2 verified (FRTS at {:#x})", layout.frts_offset);
+    Ok(())
+}
+
 /// Kernel kgspExecuteScrubberIfNeeded_AD102 port: when the BSI scrubber
 /// handoff is not DONE, the scrubber ucode must run on SEC2 first - until
 /// then the GSP/SEC2 domains stay in their post-GFW gated state (SEC2_CPUCTL
@@ -601,7 +821,7 @@ pub fn scrubber_if_needed(gpu: &TxGpu) -> Result<(), TxError> {
     // translates through this FBIF), then portal-place the image - content
     // placement is equivalent to the kernel's DMA, the BROM validates from
     // IMEM/DMEM + the armed BROM registers.
-    crate::tx::falcon_reset(gpu, SEC2_BASE, SEC2_FBIF, SEC2_FALCON2)?;
+    crate::tx::falcon_reset(gpu, SEC2_BASE, SEC2_FBIF, SEC2_FALCON2, true)?;
     crate::tx::falcon_dma_unblock(gpu, SEC2_BASE, SEC2_FBIF)?;
     // Kernel BootFromHs placement: secure code only, physical dest 0,
     // virtual tags from imemVa (the NS part of the image is not loaded).

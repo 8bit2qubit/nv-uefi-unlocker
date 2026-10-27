@@ -109,3 +109,91 @@ WPR2_HI=0 入口判据 ✓、FBPA 停 0xffffff0f ✓、FEAT_READOUT 字段 2/5/7
    结果都继续（verdict 留日志），链条是否需要跨过门控态由实机裁决；
 3. EALREADY 改记 skip（成功类，da96e3f 语义）且不 FLR——卡已解锁时
    FLR 会抹掉活的解锁。
+
+## NvStrapsReBar 考据（2026-10-27，terminatorul/NvStrapsReBar @ master，已 clone 入 reference/）
+
+ReBarUEFI（xCuri0，MIT）的 Turing 专用 fork，目标=RTX 20xx / GTX 16xx 的
+ReBAR（issue #1 有社区验证卡列表）。**推翻我们此前"Turing BAR1 不可扩"的
+判断**——Turing BAR1 可扩且社区量产验证，机制与 AD10x 的 CYA/CFG@SEC2 完全
+不同代（再次印证"跨族移植=重抽重审"）。
+
+**GPU 侧机制（PSTRAPS，envytools hw/io/pstraps.html 权威）**：
+- 寄存器：BAR0+0x101000（PSTRAPS，nvidia 内部名 PEXTDEV）。SET0 primary
+  @+0x0、SET1 primary @+0xc；bit31=override-enable（0=复位回 ROM straps；
+  ROM 载荷在 VBIOS 0x58/0x5c/0x60/0x64）；写入**立即生效**（envytools 原文
+  "starts being used by the card immediately"）。
+- 位段（G80+，NvStrapsReBar SetupNvStraps.c 常量逐一吻合）：**BAR1 尺寸=
+  SET0[15:14]+SET1[22:20] 和值**（0=64MiB，逐级倍增，10=64GiB）；
+  SET1[19:17]=BAR0 尺寸（16MiB<<idx）；SET1[23]=BAR3 尺寸（0=2×BAR0）。
+  出厂 2070 BAR1=256MiB 应解码为和值 2。
+- 写法：改字段+置 bit31，读回确认（GpuStrapsConfirm/NoConfirm 状态变量
+  ——与我们"读回是唯一判据"同款纪律）；BAR0 基址须 <4G（直接 MMIO 写）。
+
+**平台侧机制（载具=主板 UEFI 镜像内的 DXE 驱动，需刷主板）**：hook
+`EFI_PCI_HOST_BRIDGE_RESOURCE_ALLOCATION_PROTOCOL.PreprocessController`
+（ReBarUEFI 机制），在**枚举期**改 BAR 尺寸掩码/ReBAR cap sizing，让枚举器
+按新尺寸分窗口；无 ReBAR 主板需 Above 4G Decoding + 关 CSM；S3 有重放脚本
+（S3ResumeScript.c）；改 BIOS setup 或换硬件后配置自动失效（依赖 BAR0 分配
+地址），另有 CMOS 日期探保护。前提=GPU class 须为 VGA controller。
+
+**对我们项目的意义**：
+1. 只读半场立即成立：M1 读 0x101000/0x10100c 即可判断本卡 straps 可读性与
+   出厂 BAR1 编码（sample.rs 已落地，2026-10-27）。
+2. 写半场载具不同：他们在枚举**前**（DXE 驱动）改，PCI 窗口由枚举器分配；
+   我们的 EFI app 在枚举**后**，改 straps 后需自重配 BAR1 config+root
+   bridge aperture——风险/收益与解锁使命不匹配，记录不立项，用户要则单独立项。
+3. Turing 工厂钳制问题重开（开放问题 #10）：Turing CMP 存在（30HX=TU116、
+   40HX=TU106 马甲），任务书 §0"20 系无已知 segmentation"前提需按此修正；
+   40HX 与本卡 1f07 同 die 族——M3 payload 模式的 FACTORY FEAT_READOUT_1
+   采样点（tx_booter.rs 已落地）就是为此准备的窗口。
+
+## Turing 软解锁谱系考据（2026-10-27 网络搜证，四个仓库已 clone 入 reference/）
+
+**结论：Turing 软解锁先例存在且成谱系，TU106 上有实机证明。** 源头=
+Jon Pry "A Canary in the Crypto Mine"（V67 canary 漏洞，DOI
+10.5281/zenodo.20916112）→ CMP 90HX（GA102）→ **PZH1gdmu/CMP40HX-Unlock
+v3.0.0（TU106，unlock40x_v70.c，MIT，仓库已删）** → 分四支：
+
+| 仓库 | 芯片/形态 | 状态 |
+|---|---|---|
+| xrip/cmp50hx-unlock（含 efi-unlock/） | TU102（50HX 1e09），UEFI app + kmod | **实机闭环 2026-09-10**：FP32 0.427→13.512 TF/s（**31.7×**）、DP4A **28.4×**，stock 驱动零补丁零 Xid |
+| haohervchb/Turing-unlock | TU102（ASUS 2080 Ti），GNU-EFI 载荷，v4 实测一次成功 | 结果 JSONL + VALIDATION/BOOT-STATUS 文档在库 |
+| nlzy/turing-unlock | TU102（Dell 2080 Ti 22GB 1e07），Zagitta gpu-unlock 官方 Turing 改编，kmod | 驱动 575.51.03，FP16 张量 ~1.6×（白皮书峰值 88%→160%） |
+| KohakuBlueleaf/KohakUnlock | Turing，boot-hook 形态 | offline tests + ROM 分析在库 |
+
+**钳制谱按 SKU 不同**（关键认知，勿跨卡外推）：50HX=FP32-FMA+DP4A 深钳
+（FP16 half2/INT32/带宽不钳）；GeForce TU102=FP16 张量半速；AD107M（我们
+M1）=READOUT 字段 2/5/7=2 约 1/4；**TU106 consumer=未知，等 M3 FACTORY
+READOUT 或 Windows 跑分旁证**。
+
+**解锁协议（cmp50hx efi-unlock/unlock50x_v1.c 头注，"proved on hardware
+by the 40HX project"）**：find card → BAR0 → GFW wait+PTIMER seed →
+alloc >4GB → fake GSP fw image + radix3 + WPR meta（V67 载荷作签名）→
+kill GFW → [FWSEC fallback] → SEC2 Booter load → canary ROP 开 FECS PLM
+→ SS0=0x88888888/SS1=0x8 → SEC2 sanitize → chainload OS——与我们 tx.rs
+的 claim→gfw→fwsec→booter→selectors→flr 逐段同构。
+
+**TU106 相关硬事实**：
+- 40HX/50HX 共用 **TU102 booter 归档**（kgspGetBinArchiveBooterLoadUcode_
+  TU102，nv616，ucodeId=0xD，全 blob 0xE700/appCode 0x8400/osData
+  0x8500/0x6200，SIG_PROD patch @0x8700）——Turing 家族单 booter 镜像，
+  gadget 几何大概率族内通用（与 GA10x 的逐芯片 booter 不同）；
+- FWSEC 按板自抽（V2 描述符几何 40HX/50HX 全同，仅 FRTS/WPR2 随显存尺寸
+  变——印证 §7.3 V2 布局）；chipId0：TU102=0x162000A1/TU106=0x166000A1
+  （与我们 M1 采样一致）；
+- nlzy 文档给出 TU102 gadget/栈几何表（WprMeta@0x400、sigDMA@0x600、
+  payload 0xfa00、fill 0x4a7、canary 0x6140、reg_write_indirect@0x10aa…）；
+  decompil/ 还带 gsp_tu10x_610.43.03.elf.i64（TU10x GSP IDA 库，318MB LFS）。
+
+**平台工艺可借鉴**：Windows 侧=BCD BootOrder 头插 + bootmgfw 链载（40HX
+工具原样）；AGESA/AMD APU 主机要走 CF8-only 找卡路径（RootBridgeIo 会挂）；
+PCIe Gen2 重训绝不在 pre-OS 做（X99/X299 挂死，OS 侧 BYOVD 做）；他们注
+"OpenVolume from a loaded app hard-hangs whole firmware families"（我们
+的 loader.log 用 SFS 在自己的机器上没出过事——平台相关，留档）；Windows
+下装完设 EnableGpuFirmware=1 确保 GSP 路径接受 pre-OS 态。
+
+**对我们的影响**：M3 的"无载荷链"技术不确定性大幅下降（TU106 全链已由
+40HX 项目实机证明）；M2 资产清单更新——booter_load_tu10x=nv616 TU102
+归档 blob（钉 610.43.03），fwsec=自 PROM 抽（M2 已计划），fwsignature
+=TU10x 签名段；开放问题 #10 的关闭路径不变但风险大降。
+

@@ -163,12 +163,26 @@ fn extract_tu10x(source: &Path, outdir: &Path) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let (image, desc) = build_gsp_boot_v4(&String::from_utf8(boot_src.clone()).map_err(|_| "non-ascii")?)
         .map_err(|e| e.to_string())?;
+    // Generic falcon BL (WITH_LOADER loader for the Turing FWSEC fire).
+    let bl_src = assets::archive::extract_member_xz(source, &format!("{root}{}", pins::BINDATA_SEC2_BL))
+        .map_err(|e| e.to_string())?;
+    if pins::BINDATA_SEC2_BL_SHA256 != "UNMEASURED" && sha256_hex(&bl_src) != pins::BINDATA_SEC2_BL_SHA256 {
+        return Err("pinned TU102 generated source mismatch (sec2 bl)".into());
+    }
+    let bl = assets::bindata::array_bytes(
+        &String::from_utf8(bl_src.clone()).map_err(|_| "non-ascii")?,
+        "UCODE_IMAGE",
+    )
+    .map_err(|e| e.to_string())?
+    .data;
     // Raw generated sources stay on disk for forensics (never enter git).
     std::fs::write(outdir.join("booter_load_tu10x_raw.c"), &booter_src).map_err(|e| e.to_string())?;
     std::fs::write(outdir.join("gsp_boot_tu10x_raw.c"), &boot_src).map_err(|e| e.to_string())?;
+    std::fs::write(outdir.join("sec2_bl_tu10x_raw.c"), &bl_src).map_err(|e| e.to_string())?;
     write_derived("booter_load_tu10x.bin", &booter, pins::DERIVED_BOOTER_LOAD)?;
     write_derived("gsp_boot_tu10x.bin", &image, pins::DERIVED_GSP_BOOT)?;
     write_derived("gsp_boot_desc_tu10x.bin", &desc, pins::DERIVED_GSP_BOOT_DESC)?;
+    write_derived("sec2_bl_tu10x.bin", &bl, pins::DERIVED_SEC2_BL)?;
     Ok(())
 }
 
@@ -200,7 +214,7 @@ fn extract_scrub(source: &Path, outdir: &Path) -> Result<(), String> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let usage = "usage: assets <generate [out.bin] | generate-ad102 [out.bin] | extract <src.tar.xz> <outdir> | extract-ad102 <src.tar.xz> <outdir> | extract-tu10x <src.tar.xz> <outdir> | extract-scrub <src.tar.xz> <outdir> | fw <pkg.tar.zst> <outdir> | gsp-sections <gsp.bin> <outdir> | vbios <rom>>";
+    let usage = "usage: assets <generate [out.bin] | generate-ad102 [out.bin] | generate-tu10x [out.bin] | extract <src.tar.xz> <outdir> | extract-ad102 <src.tar.xz> <outdir> | extract-tu10x <src.tar.xz> <outdir> | extract-scrub <src.tar.xz> <outdir> | fw <pkg.tar.zst> <outdir> | gsp-sections <gsp.bin> <outdir> | vbios <rom>>";
     let result = match args.get(1).map(String::as_str) {
         Some("generate") => {
             let out: PathBuf = args
@@ -221,6 +235,18 @@ fn main() {
                 .unwrap_or_else(|| "v67-ad102-610.43.03-four-plm.bin".into())
                 .into();
             assets::payload::build_pinned_ad102().and_then(|payload| {
+                std::fs::write(&out, &payload).map_err(|e| e.to_string())?;
+                println!("wrote {} ({} bytes, SHA-256 verified)", out.display(), payload.len());
+                Ok(())
+            })
+        }
+        Some("generate-tu10x") => {
+            let out: PathBuf = args
+                .get(2)
+                .cloned()
+                .unwrap_or_else(|| "v67-tu10x-four-plm.bin".into())
+                .into();
+            assets::payload::build_pinned_tu102().and_then(|payload| {
                 std::fs::write(&out, &payload).map_err(|e| e.to_string())?;
                 println!("wrote {} ({} bytes, SHA-256 verified)", out.display(), payload.len());
                 Ok(())

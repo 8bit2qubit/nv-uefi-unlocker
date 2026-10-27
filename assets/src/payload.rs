@@ -102,6 +102,74 @@ pub fn build_pinned_ad102() -> Result<Vec<u8>, String> {
     Ok(payload)
 }
 
+/// TU102 (Turing) V67 signature image — GPL-2.0-only behavioral port of
+/// nlzy/turing-unlock firmware/generate_v67.py build_payload() (610.43.03,
+/// mutex-free variant; the same image is live-proven by cmp50hx-unlock
+/// efi-unlock, 2026-09-10). Chained writes: FEAT_PLM=0xffffffff then
+/// WPR2_HI=0, chained through the booter's write mid-entry 0x10B9; the
+/// tail frames bake the ACR mutex-3 release (guard 0x6140 canary, tokens
+/// 0xCBD/0xC95/0xE85, main SP 0xFFF0 / token 0xFFFF) and land on the
+/// secure teardown 0x7C43. Fill 0x4A7 (TU102; GA102's is 0x19C).
+/// Reference offsets are dmem-0x600; ours are payload bytes.
+/// The reference writes teardown 0x7C43 at 0xF97C in its frame loop and
+/// then overwrites that dword with 0xCBD — the flat list records the
+/// post-overwrite value, matching byte-for-byte.
+pub const FILL_DWORD_TU102: u32 = 0x0000_04A7;
+pub const PATCHED_WORDS_TU102: &[(usize, u32)] = &[
+    (0x1100, 0x0000_0007), // f100 restore
+    (0xF938, 0x0000_6140), // guard
+    (0xF940, 0xFFFF_FFFF), // write value #1 (FEAT_PLM open)
+    (0xF944, 0x0040_9650), // addr #1 FEAT_PLM
+    (0xF94C, 0x0000_10B9), // write mid-entry
+    (0xF950, 0x0000_6140), // guard (chained frame 0)
+    (0xF958, 0x0000_0000), // write value #2 (WPR2_HI=0)
+    (0xF95C, 0x001F_A828), // addr #2 WPR2_HI
+    (0xF964, 0x0000_10B9), // write mid-entry
+    (0xF968, 0x0000_6140), // guard (chained frame 1)
+    (0xF974, 0x0000_0000),
+    (0xF97C, 0x0000_0CBD), // mutex token (reference: 0x7C43 then overwritten)
+    (0xF980, 0x0000_0001),
+    (0xF984, 0x0000_0000),
+    (0xF988, 0x0000_8E18),
+    (0xF98C, 0x0000_0000),
+    (0xF990, 0x0000_04A7), // fill
+    (0xF994, 0x0000_0C95),
+    (0xF998, 0x0000_6140),
+    (0xF99C, 0x0000_0000),
+    (0xF9A0, 0x0000_0000),
+    (0xF9A4, 0x0000_0001),
+    (0xF9A8, 0x0000_04A7), // fill
+    (0xF9AC, 0x0000_1F89),
+    (0xF9B0, 0x0000_6140),
+    (0xF9B4, 0x0000_6140),
+    (0xF9B8, 0x0000_FFFF), // token = main SP 0xFFF0 + 0xF
+    (0xF9BC, 0x0000_04A7), // fill
+    (0xF9C0, 0x0000_1F89),
+    (0xF9C4, 0x0000_6140),
+    (0xF9C8, 0x0000_6140),
+    (0xF9CC, 0x0000_0000),
+    (0xF9D0, 0x0000_04A7), // fill
+    (0xF9D4, 0x0000_0E85),
+    (0xF9D8, 0x0000_1F89),
+    (0xF9DC, 0x0000_6140),
+    (0xF9E0, 0x0000_6140),
+    (0xF9E4, 0x0000_0000),
+    (0xF9E8, 0x0000_04A7), // fill
+    (0xF9EC, 0x0000_7EA4),
+    (0xF9F8, 0x0000_0000), // main SP + 8
+];
+
+use crate::manifest::tu10x_610::V67_TU10X_PAYLOAD_SHA256;
+
+pub fn build_pinned_tu102() -> Result<Vec<u8>, String> {
+    let payload = build_payload(FILL_DWORD_TU102, PAYLOAD_SIZE, PATCHED_WORDS_TU102);
+    let digest = sha256_hex(&payload);
+    if digest != V67_TU10X_PAYLOAD_SHA256 {
+        return Err(format!("TU102 payload differs from pinned SHA-256 ({digest})"));
+    }
+    Ok(payload)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,6 +182,19 @@ mod tests {
         assert_eq!(payload.len(), 0xFA00);
         assert_eq!(&payload[0..4], &0x19C_u32.to_le_bytes());
         assert_eq!(&payload[0xF9EC..0xF9F0], &0x81EE_u32.to_le_bytes());
+    }
+
+    #[test]
+    fn tu102_reference_payload_reproduces_pinned_sha256() {
+        // nlzy/turing-unlock generate_v67.py ground truth (pinned sha in
+        // manifest::tu10x_610) — validates the hand-transcribed patch table.
+        let payload = build_pinned_tu102().expect("pinned payload must reproduce");
+        assert_eq!(payload.len(), 0xFA00);
+        assert_eq!(&payload[0..4], &0x4A7_u32.to_le_bytes());
+        assert_eq!(&payload[0xF940..0xF944], &0xFFFF_FFFF_u32.to_le_bytes());
+        assert_eq!(&payload[0xF944..0xF948], &0x0040_9650_u32.to_le_bytes());
+        assert_eq!(&payload[0xF95C..0xF960], &0x001F_A828_u32.to_le_bytes());
+        assert_eq!(&payload[0xF97C..0xF980], &0x0CBD_u32.to_le_bytes());
     }
 
     #[test]

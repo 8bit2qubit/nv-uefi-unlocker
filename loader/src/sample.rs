@@ -45,6 +45,10 @@ const TABLE: &[Reg] = &[
     Reg("ADA WPR_PLM 0x1fa7c4", 0x001f_a7c4),
     Reg("ADA WPRCFG_PLM 0x1fa7cc", 0x001f_a7cc),
     Reg("ADA FBPA_PLM 0x9a0148", 0x009a_0148),
+    // The REAL Turing FEAT block (cmp50hx lines 294-296; the 0x823xxx sweep
+    // measures a different locked block on Turing).
+    Reg("TU10x FEAT_PLM 0x409650", 0x0040_9650),
+    Reg("TU10x FEAT_SS0 0x409664", 0x0040_9664),
 ];
 
 /// FEAT override cluster, dword sweep (task brief: 0x823804-0x823820 focus;
@@ -153,6 +157,35 @@ pub fn run(gpu: &FoundGpu) {
     // FEAT_READOUT_1 headline: 0x00000000 = full speed, non-zero = throttled.
     let readout = pci.bar_read_u32(BAR0, 0x0082_3818);
     info!("SAMPLE FEAT_READOUT_1 = {readout:#010x} (0 = no compute throttle active)");
+
+    // PSTRAPS (envytools hw/io/pstraps.html; NvStrapsReBar SetupNvStraps.c).
+    // G80+: BAR1 size = SET0[15:14] + SET1[22:20] summed (0=64MiB, each +1
+    // doubles, 10=64GiB); SET1[19:17]=BAR0 size index (16MiB<<idx);
+    // SET1[23]=BAR3 size (0=2*BAR0, 1=1*BAR0); bit31=override-enable (0
+    // restores ROM straps on reset). Turing ReBAR is real and works through
+    // exactly these straps (NvStrapsReBar, verified GTX 16xx / RTX 20xx) -
+    // the factory value is the read-only half of the TU106 BAR1 question.
+    const BAR1_SIZES: [&str; 11] = [
+        "64MiB", "128MiB", "256MiB", "512MiB", "1GiB", "2GiB", "4GiB", "8GiB", "16GiB", "32GiB",
+        "64GiB",
+    ];
+    let straps0 = pci.bar_read_u32(BAR0, 0x0010_1000);
+    let straps1 = pci.bar_read_u32(BAR0, 0x0010_100c);
+    info!(
+        "SAMPLE PSTRAPS SET0 0x101000 = {straps0:#010x} [{}] / SET1 0x10100c = {straps1:#010x} [{}]",
+        classify(straps0),
+        classify(straps1),
+    );
+    if classify(straps0) == "ok" && classify(straps1) == "ok" {
+        let bar1_idx = ((straps0 >> 14) & 0x3) + ((straps1 >> 20) & 0x7);
+        let bar0_idx = (straps1 >> 17) & 0x7;
+        info!(
+            "SAMPLE PSTRAPS decode: BAR1 index {bar1_idx} = {}  BAR0 index {bar0_idx} (16MiB<<idx)  BAR3={}BAR0  override_en={} (0 = ROM straps win on reset)",
+            BAR1_SIZES.get(bar1_idx as usize).copied().unwrap_or("reserved(>10)"),
+            if straps1 & 0x0080_0000 != 0 { "1x" } else { "2x" },
+            straps0 >> 31,
+        );
+    }
 
     // PROM identity: CRC32 of the first 64 KiB of the VBIOS image window.
     let mut buf = vec![0u32; PROM_CRC_DWORDS];
