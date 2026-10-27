@@ -36,6 +36,7 @@ const CANDIDATES: &[&CStr16] = &[
     cstr16!(r"\EFI\opensuse\shimx64.efi"),
     cstr16!(r"\EFI\grub\grubx64.efi"),
     cstr16!(r"\EFI\systemd\systemd-bootx64.efi"),
+    cstr16!(r"\EFI\limine\limine_x64.efi"),
     cstr16!(r"\EFI\shim\shimx64.efi"),
 ];
 
@@ -70,6 +71,37 @@ pub fn chain_load_bootmgfw() -> Result<()> {
     // Our own volume is fingerprinted per volume inside open_volume_logged
     // (device-path prefix + loaded-image device match; the plain handle
     // comparison does not hold on every firmware).
+
+    // Pass 0: the stick-root pin (issue #8). `\chain-target.txt`'s first
+    // usable line is an EFI path tried on EVERY volume before the built-in
+    // candidate order - dual-boot machines put their Linux loader first
+    // without waiting for a new loader entry in this file. Not found =
+    // fall through to the default order with a loud log line: the chain
+    // must never strand the user at the shell because a pin went stale
+    // (contrast tx-select-bdf.txt's refuse-to-guess - GPU writes are
+    // high-stakes, a boot target is not).
+    if let Some(target) = pinned_chain_target() {
+        info!("CHAIN: chain-target.txt pins '{target}' - trying it on every volume first");
+        match uefi::CString16::try_from(target.as_str()) {
+            Ok(target_c) => {
+                let target_ref: &CStr16 = &target_c;
+                for handle in fs_handles.iter() {
+                    let Some((mut dir, _)) = open_volume_logged(*handle) else {
+                        continue;
+                    };
+                    if dir.open(target_ref, FileMode::Read, FileAttribute::empty()).is_ok() {
+                        info!("CHAIN: pinned loader found on {:?}: {}", handle, target);
+                        drop(dir);
+                        return start_loader(*handle, target_ref);
+                    }
+                }
+                info!("CHAIN: pinned target not found on any volume - falling back to the default candidates");
+            }
+            Err(_) => {
+                info!("CHAIN: pinned path not UCS-2 convertible - falling back to the default candidates");
+            }
+        }
+    }
 
     // Pass 1: specific candidates in GLOBAL priority order - bootmgfw on
     // ANY volume first (the normal Windows chain), then the common Linux
@@ -142,6 +174,67 @@ pub fn chain_load_bootmgfw() -> Result<()> {
     Err(uefi::Status::NOT_FOUND.into())
 }
 
+/// Read cap for marker/config files: they are tiny; a larger file
+/// truncated to this is still fine for presence checks and first-line
+/// path parses.
+const MARKER_READ_CAP: usize = 4096;
+
+/// Read a small marker/config file from our own boot volume. Any
+/// filesystem error counts as absent: the default semantics must never be
+/// upgraded by a probe failure. Absent-file is the normal case and stays
+/// silent; volume-level failures are logged (they explain a marker that
+/// "should have" engaged but did not).
+fn boot_volume_read(path: &CStr16) -> Option<alloc::vec::Vec<u8>> {
+    let mut fs = match boot::get_image_file_system(boot::image_handle()) {
+        Ok(fs) => fs,
+        Err(e) => {
+            info!("MARKER: image fs open failed: {:?}", e.status());
+            return None;
+        }
+    };
+    let mut dir = match fs.open_volume() {
+        Ok(d) => d,
+        Err(e) => {
+            info!("MARKER: open_volume failed: {:?}", e.status());
+            return None;
+        }
+    };
+    let file = match dir.open(path, FileMode::Read, FileAttribute::empty()) {
+        Ok(f) => f,
+        Err(_) => return None,
+    };
+    let mut file = match file.into_regular_file() {
+        Some(f) => f,
+        None => return None,
+    };
+    let mut out = alloc::vec::Vec::new();
+    let mut chunk = [0u8; 512];
+    loop {
+        match file.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                out.extend_from_slice(&chunk[..n]);
+                if out.len() >= MARKER_READ_CAP {
+                    out.truncate(MARKER_READ_CAP);
+                    break;
+                }
+            }
+            Err(e) => {
+                info!("MARKER: read failed: {:?}", e.status());
+                return None;
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Does `path` exist on our own boot volume? Marker-file probe for the
+/// CONFIRM phase (`\i_know_what_i_am_doing.txt` armed mode) - presence is
+/// the signal, content is ignored.
+pub fn boot_volume_has(path: &CStr16) -> bool {
+    boot_volume_read(path).is_some()
+}
+
 /// Open the volume with one retry (freshly reconnected volumes may need a
 /// beat), and report whether this handle is our own volume (device-path
 /// fingerprint: our image path's file-name tail is compared against the
@@ -193,8 +286,40 @@ fn open_volume_logged(
     Some((dir, is_own))
 }
 
+/// Parse `\chain-target.txt`: the first non-empty, non-`#` line is the
+/// pinned EFI path (leading `\` required, <= 240 chars). Anything else
+/// (missing file, unparsable content, no usable line) is None with the
+/// reason logged - default order, never a guess.
+fn pinned_chain_target() -> Option<alloc::string::String> {
+    let bytes = boot_volume_read(cstr16!(r"\chain-target.txt"))?;
+    let text = match core::str::from_utf8(&bytes) {
+        Ok(t) => t,
+        Err(_) => {
+            info!("CHAIN: chain-target.txt is not UTF-8 - pin ignored, default order");
+            return None;
+        }
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if !line.starts_with('\\') {
+            info!("CHAIN: chain-target.txt line '{line}' lacks the leading backslash - pin ignored, default order");
+            return None;
+        }
+        if line.chars().count() > 240 {
+            info!("CHAIN: chain-target.txt path over 240 chars - pin ignored, default order");
+            return None;
+        }
+        return Some(alloc::string::String::from(line));
+    }
+    info!("CHAIN: chain-target.txt has no usable line - pin ignored, default order");
+    None
+}
+
 /// Start the loader at `path` on the volume `handle` (read-only chainload).
-fn start_loader(handle: uefi::Handle, path: &'static CStr16) -> Result<()> {
+fn start_loader(handle: uefi::Handle, path: &CStr16) -> Result<()> {
     // Safety: same ByHandleProtocol discipline for the device path.
     let dp = unsafe {
         boot::open_protocol::<DevicePath>(

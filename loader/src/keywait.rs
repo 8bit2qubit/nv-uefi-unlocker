@@ -81,3 +81,32 @@ pub fn wait_confirm(seconds: u64) -> Confirm {
         Confirm::Proceed
     }
 }
+
+/// Armed CONFIRM (`\i_know_what_i_am_doing.txt` on the stick root): the
+/// stick itself carries the operator's declaration of intent, so the wait
+/// collapses to a short countdown that PROCEEDS on timeout; any key during
+/// the window is a human saying stop - TX builds abort into chain-load
+/// with zero GPU writes, read-only builds have nothing to abort (they
+/// proceed; everything is zero-write by design).
+pub fn wait_confirm_armed(seconds: u64) -> Confirm {
+    let ticks = seconds * 20;
+    for _ in 0..ticks {
+        if let Some(key) = poll_key() {
+            #[cfg(feature = "tx")]
+            {
+                info!(
+                    "CONFIRM: key {key:?} during the {seconds}s armed countdown - ABORT (no GPU writes this boot)"
+                );
+                return Confirm::Abort;
+            }
+            #[cfg(not(feature = "tx"))]
+            {
+                info!("CONFIRM: key {key:?} during the armed countdown, proceeding (read-only build)");
+                return Confirm::Proceed;
+            }
+        }
+        boot::stall(Duration::from_millis(50));
+    }
+    info!("CONFIRM: {seconds}s armed countdown elapsed - PROCEED (marker file opted in)");
+    Confirm::Proceed
+}

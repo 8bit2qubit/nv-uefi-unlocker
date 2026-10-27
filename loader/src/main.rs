@@ -9,6 +9,7 @@ extern crate log;
 
 use log::info;
 use uefi::prelude::*;
+use uefi::CStr16;
 
 mod banner;
 mod chainload;
@@ -30,6 +31,13 @@ mod tx_portal;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// CONFIRM semantics switch (armed mode): when this file exists on the
+/// stick root, the operator has declared intent ON THE STICK ITSELF - the
+/// wait becomes a short countdown that auto-proceeds, any key aborts.
+const ARMED_MARKER: &CStr16 = cstr16!(r"\i_know_what_i_am_doing.txt");
+const CONFIRM_WAIT: u64 = 30;
+const ARMED_WAIT: u64 = 5;
+
 #[entry]
 fn main() -> Status {
     logging::init(VERSION);
@@ -39,8 +47,19 @@ fn main() -> Status {
     // key aborts into chain-load with zero GPU writes (issue #4.1: the old
     // code proceeded on any key AND on timeout, so a stick left in a machine
     // could run the transaction unattended). Read-only builds keep the M0
-    // semantics.
-    let confirmed = keywait::wait_confirm(30);
+    // semantics. Armed mode (marker file on the stick root) inverts this:
+    // a 5s countdown auto-proceeds, any key aborts - the file is the
+    // operator's explicit declaration of intent, so unattended runs are
+    // opt-in per stick, never a default.
+    let confirmed = if chainload::boot_volume_has(ARMED_MARKER) {
+        info!(
+            "CONFIRM: \\i_know_what_i_am_doing.txt present - ARMED: {ARMED_WAIT}s countdown auto-runs, ANY key aborts"
+        );
+        keywait::wait_confirm_armed(ARMED_WAIT)
+    } else {
+        info!("CONFIRM: no armed marker - Space/{CONFIRM_WAIT}s confirm semantics");
+        keywait::wait_confirm(CONFIRM_WAIT)
+    };
 
     // Phase: ENUMERATE (read-only). ALL NVIDIA display adapters, in
     // firmware enumeration order.

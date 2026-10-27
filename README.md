@@ -36,6 +36,8 @@ FLR 会重锁 PLM、Windows 驱动需 GSP 模式——均与 Ada 不同）。
 | `v67-ad102-four-plm.bin` | **V67 四写 payload——放上即解锁模式** | 可选 |
 | `tx-require-d0.txt` | 入口非 D0（休眠恢复）时直接 abort、零写入 | 可选 |
 | `tx-select-bdf.txt` | 多卡钉卡：内容 `bb:dd.f` 或 `dddd:bb:dd.f`（十六进制） | 可选 |
+| `i_know_what_i_am_doing.txt` | **武装模式**：确认环节变为 5 秒倒计时后自动运行，倒计时内按任意键终止（无人值守/自动化用；文件存在即意图声明，内容忽略） | 可选 |
+| `chain-target.txt` | 链回目标钉定：第一个非空且非 `#` 的行 = 优先尝试的 EFI 路径（如 `\EFI\limine\limine_x64.efi`），逐卷尝试；全卷找不到则回退默认顺序并留痕（issue #8 建议） | 可选 |
 | `\loader.log` | （运行产物）全部阶段日志，evidence record | 输出 |
 
 不放 `v67-*.bin` 即为**回放/诊断模式**：走完全链但零解锁写入（刷存在感
@@ -52,12 +54,16 @@ emergency FLR、不阻断后续；控制台在另一张卡上时全程有屏（G
 
 1. BIOS：关 Secure Boot。显示模式/进入方式按下面的实测表选——**推荐独显直连**，
    混合模式只在"重启、且 dGPU 有电"这一种进入方式下可用（见原因分析）。
-2. U 盘启动 → 版本屏 → **空格确认**（30 秒无操作自动回 Windows）。
+2. U 盘启动 → 版本屏 → **空格确认**（30 秒无操作自动回 Windows）。若 U 盘根
+   存在 `i_know_what_i_am_doing.txt`（武装模式），确认环节变为 **5 秒倒计时后
+   自动运行**，倒计时内按任意键终止——文件本身就是明确的运行意图声明，供
+   自动化/无人值守场景使用；缺省（无此文件）永远是"必须有人按键确认"。
 3. 之后全自动：事务完成或失败都会自动链回 bootmgfw 进 Windows，全程日志
    落 U 盘 `\loader.log`。引导器查找顺序固定为 **bootmgfw → 各发行版
-   shim/grub/systemd-boot → U 盘 `\EFI\BOOT\BOOTX64.EFI`**；只有走到最后
+   shim/grub/systemd-boot/Limine → U 盘 `\EFI\BOOT\BOOTX64.EFI`**；只有走到最后
    这一档（即本工具自己所在的通用路径）才给 5 秒窗口，按任意键回固件
    shell（此时解锁已完成、日志已落盘，可从 shell 手动启动任何系统）。
+   双系统用户可用 `\chain-target.txt` 把自定义 EFI 路径插到最前（见上表）。
 4. 每次冷启动重放一次（解锁易失，无持久化、无刷写、断电即清）。
 
 V67 payload 与全部资产再生成：`cargo run -p assets -- generate-ad102` /
@@ -65,7 +71,8 @@ V67 payload 与全部资产再生成：`cargo run -p assets -- generate-ad102` /
 产物 hash 硬校验；期望值见报告哈希表）。
 
 release 包只发脚本与自产二进制（`BOOTX64.EFI`、`assets-x86_64-windows.exe`、
-`make-usbroot.ps1`、`enable-turing-unlock.ps1`），**不含任何 NVIDIA bin**——
+`assets-x86_64-linux`、`make-usbroot.ps1`、`make-usbroot.sh`、
+`enable-turing-unlock.ps1`），**不含任何 NVIDIA bin**——
 全部固件件由 maker 从上面钉 SHA-256 的公开输入现场再生：
 
 ```powershell
@@ -73,6 +80,14 @@ release 包只发脚本与自产二进制（`BOOTX64.EFI`、`assets-x86_64-windo
 .\make-usbroot.ps1 -Family ga102 ...   # 30 系（rtx30 / 30 同义）
 .\make-usbroot.ps1 -Family tu10x ...   # 20 / 16 系（rtx20 / 20 同义；GSP 门强制）
 ```
+
+Linux/WSL/Git Bash 等价：`./make-usbroot.sh`，参数与 PS1 一一对应
+（`--family/--out/--work/--assets/--boot-efi/--proven-blob/--skip-gsp-check`）。
+release 包内含 Linux 版管线 `assets-x86_64-linux`，脚本优先取用；仓库检出里
+找不到该文件时自动 `cargo build -p assets` 兜底（需 Rust 工具链）。tu10x 的
+GSP 门在 Linux 端读 nvidia-smi 运行态（Linux 专有驱动 545+ 对 Turing 及之后
+架构缺省运行 GSP-RM，无需 EnableGpuFirmware 类开关；门拦的是"驱动过旧"与
+"被 modprobe 配置强关 GSP"两种 legacy 态），并会探测本机 RTD3 给出 issue #9 提示。
 
 Turing 的 proven BL 归档 `gsp_rm_boot_dbg.bin` 由脚本自动从钉 SHA-256 的
 cmp50hx 仓库下载；离线时用 `-ProvenBlob <path>` 指本地文件。
@@ -106,6 +121,57 @@ cmp50hx 仓库下载；离线时用 `-ProvenBlob <path>` 指本地文件。
     PRI 域门控——VGA_WORKSPACE 读回 `0xbadf1301` 就是它在寄存器层的投影。
 - 本工具在驱动加载前工作，没有 ACPI 解释器，无法像 Windows 驱动那样跑
   `_PS0`/PR3 给卡上电，因此这三种失败态只能靠换进入方式规避，不能靠代码绕过。
+
+## Linux 用户注意：runtime D3（RTD3）会在交接后擦掉解锁（issue #9）
+
+解锁是易失覆盖（设计上无持久化、断电即清），而 **D3cold 对相关电源域等价于
+断电**。Linux 下若 NVIDIA 驱动启用了 runtime D3（RTD3），GPU 一空闲就会被
+挂起进 D3cold，解锁状态随之丢失——典型症状：`loader.log` 全绿（marker/PLM
+读回全部正确）但进入系统后性能回到 stock（[issue #9](https://github.com/physicsdolphin/nv-uefi-unlocker/issues/9)，
+4050 Laptop `28a1` + Ubuntu 实测：GPU 停在 D3cold/suspended、生效的
+`DynamicPowerManagement` 为 `0x02`）。
+
+Ubuntu 及衍生版在受支持的笔记本上缺省启用 RTD3（发行版文件
+`/usr/lib/modprobe.d/nvidia-runtimepm.conf` 写死
+`options nvidia NVreg_DynamicPowerManagement=0x02`）。关闭它有三个坑，
+少一个都可能白改：
+
+1. **复用发行版文件的 basename**。modprobe.d 规则是"同名文件按目录顺序
+   先到先得，后续目录的同名文件**整体忽略**"（modprobe.d(5)）；而**不同名**
+   文件的 options 是累加关系，实测会输给发行版值（issue #9：先试了不同名的
+   `nvidia-pm.conf` 写 `0x00`，`modprobe -c` 显示两条、驱动仍取 `2`）。复用
+   basename 即整体遮蔽发行版文件：
+
+   ```bash
+   echo 'options nvidia NVreg_DynamicPowerManagement=0x00' | \
+       sudo tee /etc/modprobe.d/nvidia-runtimepm.conf
+   ```
+
+2. **重建 initramfs**——NVIDIA 模块在 initramfs 内早加载，配置不进镜像等于白改：
+
+   ```bash
+   sudo update-initramfs -u      # Debian/Ubuntu（Fedora/RHEL：sudo dracut -f）
+   ```
+
+3. **重启后验证生效值而不是文件内容**（与本项目宪法第 1 条同款逻辑）：
+
+   ```bash
+   grep DynamicPowerManagement /proc/driver/nvidia/params   # 应为 0x00
+   modprobe -c | grep -i DynamicPowerManagement             # 只应有一行 0x00
+   ```
+
+排障速查——"日志全绿但系统内无提升"先过这张表再报 issue：
+
+| 检查 | 命令 | 解锁存活应看到 |
+| --- | --- | --- |
+| 驱动参数生效值 | `grep DynamicPowerManagement /proc/driver/nvidia/params` | `0x00`（`0x02/0x03` = RTD3 开着） |
+| 合并后配置 | `modprobe -c \| grep -i DynamicPowerManagement` | 仅一行，且为 `0x00` |
+| GPU 电源状态 | `cat /sys/bus/pci/devices/<bdf>/power_state` | `D0`（`D3cold` = 已失电，解锁已丢） |
+| 挂起旁证 | `nvidia-smi` | 有正常读数（GPU 挂起时全 N/A） |
+
+同理：S3/S4 挂起再唤醒也是失电，重跑一次 U 盘事务即可。D3cold 是最隐蔽的
+一种——不报错、不黑屏，只是安静地把解锁擦掉。Linux 版 maker
+（`make-usbroot.sh`）构建 U 盘时会探测本机 RTD3 状态并给出提示。
 
 ## 与 nvoc kmd 功耗墙解锁配合使用
 
@@ -211,7 +277,7 @@ claim(断 GOP/驱动+独占) → scrubber(BSI handoff 1→3) → FWSEC-FRTS(WPR2
 | AD106 | 4060Ti 2803 / 4060Ti 16G 2805 | **2803 ✅ 实测**（PR #5，AD106 桌面：回放 + 解锁 + 四写读回，FP16 46.78→75.28 TFLOPS）；2805 🟢 上游硅验证 |
 | AD106 | 4070 Laptop **2820**（魔改卡同 ID） | 🟡 路由已加（2026-10-28）：同 AD106 家族资产、与 2803 同 die 家族（上游表同样缺此 ID）。首次实机请按下文"不兼容/异常时"提交 `\loader.log` 全文，验证后再升级层级；**魔改卡另请附原卡型号与 VBIOS 版本** |
 | AD104 | 4070Ti 2782 / 4070S 2783 / 4070 2786 | 🟢 上游硅验证 |
-| AD103 | 4080S 2702 / 4080 2704 / 4070TiS 2705 / 4070 2709 / 4090M 2757 | 🟢 上游硅验证 |
+| AD103 | 4080S 2702 / 4080 2704 / 4070TiS 2705 / **4070 2709** / 4090M 2757 | **2709 ✅ 实测**（[issue #8](https://github.com/physicsdolphin/nv-uefi-unlocker/issues/8)，B760 台式独显直连：四写全链读回、选择器穿 FLR；OS 侧 sm_89 mma 微基准 FP16 ~61→**123.91**、BF16 **118.90**、FP8 **243.55** TFLOPS，均 **2.0×**）；其余 🟢 上游硅验证 |
 | AD102 | 4090 2684 / 4090D 2685 / 4070TiS 2689 | 🟢 上游硅验证 |
 | GA10x | 3090/3080 2204/2206、3070 系 2484–248c、3060 系 2501/2503–2509/252f/2544、3050 2584、2560、20c2/20f1 | 🟡 上游 kmod 验证，本 EFI 路径无硅证据 |
 | **TU106** | **RTX 2070 1f07** | ✅ 实测（2026-10-27，v0.2.0）：全链通过（FWSEC 点火 → BOOT_DIRECT booter → V67 起爆 → PLM 0x409650 全开 → SS0/SS1 写入读回 → 签名还原）；**FP32 累加 36 → 60–63 TFLOPS（+67~75%）**。**前置：Windows 侧 GSP 固件模式（见下节），必须重启生效**。实测机：Intel 10980HK ES（QTJ1）+ 2070 混合输出台式平台；**休眠恢复后进 U 盘写入解锁 → Windows 验证通过** |
@@ -265,6 +331,10 @@ TU106 出厂钳制实测：SS0 冷值非默认（0x15000/0x11000/0x0 引导间
 完整阶段轨迹，是我们诊断的唯一依据；发前可脱敏机器信息）。也可以在
 [Discussions](https://github.com/physicsdolphin/nv-uefi-unlocker/discussions)
 分享成功/失败数据点（卡型号 + 关键日志行 + 判据值），帮助扩展矩阵。
+
+**Linux 用户**：症状为"`loader.log` 全绿但进系统后无提升"的，先过上文
+「Linux 用户注意」一节的排障表——RTD3/D3cold 会在交接后静默擦掉易失解锁
+（issue #9），这不是事务失败，别急着交日志。
 
 ### 已知问题（已在 loader 内修复）：booter status 0x89 = GPU 上游 PCI 桥的 Bus Master 未使能
 
