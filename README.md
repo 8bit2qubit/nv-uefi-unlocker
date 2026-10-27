@@ -7,13 +7,19 @@ UEFI DXE 时窗执行完整固件事务：SEC2 scrubber → FWSEC-FRTS（WPR2）
 Booter 启动 GSP-RM →（门控后）V67 四写 payload → 读回验证 → FLR → 链式交回
 Windows Boot Manager。
 
-**当前状态：M4 闭环。** 已在 RTX 4060 Laptop（`10de:28e0`，AD107M）真机完成
-四写解锁并双端验证——固件侧 marker `0x67b00001` + 四 PLM 读回，Windows 侧
-FP16 GEMM 29.89 → 49.33 TFLOPS（1.65×）。完整报告见
-[docs/ada28e0-uefi-report.md](docs/ada28e0-uefi-report.md)（bar1 报告格式：
-判据表、链条 15 步、关键修复、社区致谢）。
+**当前状态：40 系（AD10x）+ 20 系（TU10x）双轨闭环。** 支持矩阵：
 
-该卡此前未被社区验证（最近的公开 canary 是 28e1，同芯片 ASUS 移动端）。
+- **RTX 20 系（Turing）✅ 实测支持（v0.2.0）**——RTX 2070（TU106, `10de:1f07`）
+  全链解锁：**FP32 累加 GEMM 36 → 60–63 TFLOPS（+67~75%）**。**Turing 用户
+  必须先运行 [GSP 固件模式脚本](#turing20-系专属gsp-固件模式前置必读)并重启**，
+  详见下方 Turing 专属节。
+- **RTX 40 系（Ada）✅ 实测支持**——RTX 4060 Laptop（`10de:28e0`，AD107M）
+  四写解锁双端验证：固件侧 marker `0x67b00001` + 四 PLM 读回，Windows 侧
+  FP16 GEMM 29.89 → 49.33 TFLOPS（1.65×）。完整报告见
+  [docs/ada28e0-uefi-report.md](docs/ada28e0-uefi-report.md)。
+
+两代机制差异见 [兼容性矩阵](#兼容性矩阵)（Turing 的 FEAT 块在 0x4096xx、
+FLR 会重锁 PLM、Windows 驱动需 GSP 模式——均与 Ada 不同）。
 
 ## 使用（RTX 40 系笔记本/台式，AD10x 家族）
 
@@ -59,6 +65,7 @@ V67 payload 与全部资产再生成：`cargo run -p assets -- generate-ad102` /
 | 混合模式 · 混合关机 → 重启 | 热：有 GOP，寄存器可读 | ✅ 全链跑通（四写 + 选择器穿 FLR，即 evidence 里的成功日志） |
 | 混合模式 · 休眠/唤醒之后 · D3 门控态 | 停在 D3、域门控（VGA_WORKSPACE 读回 `0xbadf1301`） | ❌ claim 前置即报 |
 | 混合模式 · 休眠/唤醒之后 · 事务可跑 | 寄存器可读、全链能绿，但卡是热的 | ⚠️ 事务绿 ≠ 解锁有效：出口后可能被作废，先看 `HANDOFF-OUT` 并做 Windows 侧读回（`docs/warm-resume-entry.md`） |
+| 混合模式 · 休眠/唤醒之后 · **TU106 实测** | 寄存器可读、全链绿 | ✅ **写入解锁成功且 Windows 验证通过**（2026-10-27，2070 台式实测：休眠恢复 → 进 U 盘 → 全链 → 解锁存活进 Windows）。上两行的"作废"警告在 TU106 + GSP 模式组合下未复现 |
 | 独显直连 · 休眠或重启 | 始终是 panel owner、始终有电 | ✅ 均可用 |
 
 操作建议：**从 Windows 选"重启"**（或冷启后直接从启动菜单进 U 盘）再运行；不要用
@@ -186,7 +193,7 @@ claim(断 GOP/驱动+独占) → scrubber(BSI handoff 1→3) → FWSEC-FRTS(WPR2
 | AD103 | 4080S 2702 / 4080 2704 / 4070TiS 2705 / 4070 2709 / 4090M 2757 | 🟢 上游硅验证 |
 | AD102 | 4090 2684 / 4090D 2685 / 4070TiS 2689 | 🟢 上游硅验证 |
 | GA10x | 3090/3080 2204/2206、3070 系 2484–248c、3060 系 2501/2503–2509/252f/2544、3050 2584、2560、20c2/20f1 | 🟡 上游 kmod 验证，本 EFI 路径无硅证据 |
-| **TU106** | **RTX 2070 1f07** | ✅ 实测（2026-10-27，v0.2.0）：全链通过（FWSEC 点火 → BOOT_DIRECT booter → V67 起爆 → PLM 0x409650 全开 → SS0/SS1 写入读回 → 签名还原）；**FP32 累加 36 → 60–63 TFLOPS（+67~75%）**。**前置：Windows 侧 GSP 固件模式（见下节），必须重启生效** |
+| **TU106** | **RTX 2070 1f07** | ✅ 实测（2026-10-27，v0.2.0）：全链通过（FWSEC 点火 → BOOT_DIRECT booter → V67 起爆 → PLM 0x409650 全开 → SS0/SS1 写入读回 → 签名还原）；**FP32 累加 36 → 60–63 TFLOPS（+67~75%）**。**前置：Windows 侧 GSP 固件模式（见下节），必须重启生效**。实测机：Intel 10980HK ES（QTJ1）+ 2070 混合输出台式平台；**休眠恢复后进 U 盘写入解锁 → Windows 验证通过** |
 | TU102/TU104/TU116（20 系其余/16 系） | 1e02–1e0f、2182–2192 等 | 🟢 同族资产+社区硅验证（2080Ti 22G chenxluo +51~75%、2080Ti 11G nlzy/haohervchb ~1.6×，同链同构） |
 | Turing 及更早（Pascal…） | — | ❌ 无事务轨 |
 | Blackwell (50 系) / GA100 | — | ❌ 链路不同，不在范围 |

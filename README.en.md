@@ -8,7 +8,18 @@ driver loads: SEC2 scrubber → FWSEC-FRTS (WPR2) → signed Booter booting
 GSP-RM → (gated) V67 four-write payload → read-back verification → FLR →
 clean handoff to the Windows Boot Manager.
 
-**Status: M4 complete.** Executed and verified end-to-end on an RTX 4060
+**Status: both 40-series (AD10x) and 20-series (TU10x) tracks closed.** Highlights:
+
+- **RTX 20 series (Turing) ✅ verified (v0.2.0)** — RTX 2070 (TU106,
+  `10de:1f07`) full-chain unlock: **FP32-accum GEMM 36 → 60-63 TFLOPS
+  (+67-75%)**. Turing users MUST run the GSP firmware-mode script and
+  RESTART first — see the Turing section below.
+- **RTX 40 series (Ada) ✅ verified** — RTX 4060 Laptop (`10de:28e0`,
+  AD107M) four-write unlock, both sides verified: firmware marker
+  `0x67b00001` + four PLM read-backs, Windows FP16 GEMM 29.89 → 49.33
+  TFLOPS (1.65x).
+
+**Status: M4 complete (Ada track).** Executed and verified end-to-end on an RTX 4060
 Laptop (`10de:28e0`, AD107M) — firmware verdicts (payload marker
 `0x67b00001`, FEAT PLM `0xffffffff`, AON selector survival across FLR) and
 Windows-side FP16 GEMM 29.89 → 49.33 TFLOPS (1.65×). Full report:
@@ -202,7 +213,9 @@ the kmod, our EFI path is structurally identical — expected compatible);
 | AD103 | 4080S 2702 / 4080 2704 / 4070TiS 2705 / 4070 2709 / 4090M 2757 | 🟢 |
 | AD102 | 4090 2684 / 4090D 2685 / 4070TiS 2689 | 🟢 |
 | GA10x | 3090/3080 2204/2206, 3070s 2484–248c, 3060s 2501/2503–2509/252f/2544, 3050 2584, 2560, 20c2/20f1 | 🟡 kmod-verified upstream; our EFI path has no silicon evidence |
-| Turing & older | 20/16 series, Pascal… | ❌ no transaction track (Turing assets staged but disabled; Turing has no known clamp) |
+| **TU106** | **RTX 2070 1f07** | ✅ verified (2026-10-27, v0.2.0): full chain (FWSEC ignite → BOOT_DIRECT booter → V67 fire → PLM 0x409650 open → SS0/SS1 written+read back → signature restore); **FP32-accum 36 → 60-63 TFLOPS (+67-75%)**. Prerequisite: Windows GSP firmware mode (see below), RESTART to apply. Host: Intel 10980HK ES (QTJ1) desktop platform, hybrid output; **hibernate-resume → USB unlock write → Windows verification passed** |
+| TU102/TU104/TU116 (rest of 20/16 series) | 1e02–1e0f, 2182–2192 etc. | 🟢 same-family assets + community silicon proof (2080Ti 22G chenxluo +51-75%, 2080Ti 11G nlzy/haohervchb ~1.6x, same chain) |
+| Turing & older (Pascal…) | — | ❌ no transaction track |
 | Blackwell (50 series) / GA100 | — | ❌ different chain, out of scope |
 
 **"Does this work on all RTX 40 cards?" — every AD10x (40-series) ID is
