@@ -10,7 +10,9 @@ Windows Boot Manager。
 **当前状态：40 系（AD10x）+ 20 系（TU10x）双轨闭环。** 支持矩阵：
 
 - **RTX 20 系（Turing）✅ 实测支持（v0.2.0）**——RTX 2070（TU106, `10de:1f07`）
-  全链解锁：**FP32 累加 GEMM 36 → 60–63 TFLOPS（+67~75%）**。**Turing 用户
+  全链解锁：**FP32 累加 GEMM 36 → 60–63 TFLOPS（+67~75%）**；2060 Super
+  （`10de:1f06`）社区实测同链通过（[issue #12](https://github.com/physicsdolphin/nv-uefi-unlocker/issues/12)）。
+  **Turing 用户
   必须先运行 [GSP 固件模式脚本](#turing20-系专属gsp-固件模式前置必读)并重启**，
   详见下方 Turing 专属节。
 - **RTX 40 系（Ada）✅ 实测支持**——RTX 4060 Laptop（`10de:28e0`，AD107M）
@@ -316,7 +318,7 @@ Blackwell（0x2bxx+）不在范围。
 | AD103 | 4080S 2702 / 4080 2704 / 4070TiS 2705 / **4070 2709** / 4090M 2757 | **2709 ✅ 实测**（[issue #8](https://github.com/physicsdolphin/nv-uefi-unlocker/issues/8)，B760 台式独显直连：四写全链读回、选择器穿 FLR；OS 侧 sm_89 mma 微基准 FP16 ~61→**123.91**、BF16 **118.90**、FP8 **243.55** TFLOPS，均 **2.0×**）；其余 🟢 上游硅验证 |
 | AD102 | 4090 2684 / 4090D 2685 / 4070TiS 2689 | 🟢 上游硅验证 |
 | GA10x | 3090/3080 2204/2206、3070 系 2484–248c、3060 系 2501–2584 等（0x22xx/0x24xx/0x25xx 全段放行；原 20c2/20f1 系 GA100 类已剔除） | 🟡 上游 kmod 验证，本 EFI 路径无硅证据 |
-| **TU106** | **RTX 2070 1f07** | ✅ 实测（2026-10-27，v0.2.0）：全链通过（FWSEC 点火 → BOOT_DIRECT booter → V67 起爆 → PLM 0x409650 全开 → SS0/SS1 写入读回 → 签名还原）；**FP32 累加 36 → 60–63 TFLOPS（+67~75%）**。**前置：Windows 侧 GSP 固件模式（见下节），必须重启生效**。实测机：Intel 10980HK ES（QTJ1）+ 2070 混合输出台式平台；**休眠恢复后进 U 盘写入解锁 → Windows 验证通过** |
+| **TU106** | **RTX 2070 1f07 / 2060 Super 1f06** | **1f07 ✅ 实测**（2026-10-27，v0.2.0）：全链通过（FWSEC 点火 → BOOT_DIRECT booter → V67 起爆 → PLM 0x409650 全开 → SS0/SS1 写入读回 → 签名还原）；**FP32 累加 36 → 60–63 TFLOPS（+67~75%）**。**前置：Windows 侧 GSP 固件模式（见下节），必须重启生效**。实测机：Intel 10980HK ES（QTJ1）+ 2070 混合输出台式平台；**休眠恢复后进 U 盘写入解锁 → Windows 验证通过**。**1f06 ✅ 实测**（[issue #12](https://github.com/physicsdolphin/nv-uefi-unlocker/issues/12)，2026-10-27，v0.2.0，@vadash）：全链通过（FWSEC → WPR2 验证 → BOOT_DIRECT booter → PLM 全开 → SS0/SS1 写入读回 0x88888888/0x8 → 签名还原 → PLM relock 后解锁值持续 → FLR 按语义跳过）→ 交棒 Windows 正常；**AMD 平台**（AM4/Promontory，桥 BME 修复路径实测覆盖）；8 GB SKU 与 2070 共用 8192 MiB 几何表（其他容量 TU106 SKU 需扩表后才可跑） |
 | TU102/TU104/TU116（20 系其余/16 系） | 1e02–1fff、2182–21d1 等 | 🟢 同族资产+社区硅验证（2080Ti 22G chenxluo +51~75%、2080Ti 11G nlzy/haohervchb ~1.6×，同链同构） |
 | Turing 及更早（Pascal…） | — | ❌ 无事务轨 |
 | Blackwell (50 系) / GA100 | — | ❌ 链路不同，不在范围 |

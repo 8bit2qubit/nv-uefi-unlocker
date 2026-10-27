@@ -13,7 +13,9 @@ are closed end to end.** Support matrix:
 
 - **RTX 20 series (Turing) ✅ verified (v0.2.0)** — RTX 2070 (TU106,
   `10de:1f07`) full-chain unlock: **FP32-accum GEMM 36 → 60-63 TFLOPS
-  (+67-75%)**. **Turing users must first run the [GSP firmware-mode
+  (+67-75%)**; 2060 Super (`10de:1f06`) community-verified on the same
+  chain ([issue #12](https://github.com/physicsdolphin/nv-uefi-unlocker/issues/12)).
+  **Turing users must first run the [GSP firmware-mode
   script](#turing-20-series-prerequisite-gsp-firmware-mode-must-read) and
   RESTART** — see the Turing section below.
 - **RTX 40 series (Ada) ✅ verified** — RTX 4060 Laptop (`10de:28e0`,
@@ -412,7 +414,7 @@ Blackwell (0x2bxx+) is out of scope.
 | AD103 | 4080S 2702 / 4080 2704 / 4070TiS 2705 / **4070 2709** / 4090M 2757 | **2709 ✅ verified** ([issue #8](https://github.com/physicsdolphin/nv-uefi-unlocker/issues/8), B760 desktop dGPU-only: full four-write chain read back, selectors surviving FLR; OS-side sm_89 mma microbenchmark FP16 ~61→**123.91**, BF16 **118.90**, FP8 **243.55** TFLOPS — all **2.0×**); the rest 🟢 upstream silicon-verified |
 | AD102 | 4090 2684 / 4090D 2685 / 4070TiS 2689 | 🟢 upstream silicon-verified |
 | GA10x | 3090/3080 2204/2206, 3070s 2484–248c, 3060s 2501–2584 etc. (0x22xx/0x24xx/0x25xx fully open since 2026-10-28; the former 20c2/20f1 are GA100-class and have been removed) | 🟡 kmod-verified upstream; our EFI path has no silicon evidence |
-| **TU106** | **RTX 2070 1f07** | ✅ verified (2026-10-27, v0.2.0): full chain (FWSEC ignite → BOOT_DIRECT booter → V67 fire → PLM 0x409650 fully open → SS0/SS1 written+read back → signature restore); **FP32-accum 36 → 60-63 TFLOPS (+67-75%)**. **Prerequisite: Windows-side GSP firmware mode (section below), RESTART to apply**. Measured host: Intel 10980HK ES (QTJ1) + 2070 hybrid-output desktop platform; **hibernate-resume → stick unlock write → Windows verification passed** |
+| **TU106** | **RTX 2070 1f07 / 2060 Super 1f06** | **1f07 ✅ verified** (2026-10-27, v0.2.0): full chain (FWSEC ignite → BOOT_DIRECT booter → V67 fire → PLM 0x409650 fully open → SS0/SS1 written+read back → signature restore); **FP32-accum 36 → 60-63 TFLOPS (+67-75%)**. **Prerequisite: Windows-side GSP firmware mode (section below), RESTART to apply**. Measured host: Intel 10980HK ES (QTJ1) + 2070 hybrid-output desktop platform; **hibernate-resume → stick unlock write → Windows verification passed**. **1f06 ✅ verified** ([issue #12](https://github.com/physicsdolphin/nv-uefi-unlocker/issues/12), 2026-10-27, v0.2.0, @vadash): full chain (FWSEC → WPR2 verified → BOOT_DIRECT booter → PLM fully open → SS0/SS1 written+read back 0x88888888/0x8 → signature restore → unlock values persist through the PLM relock → FLR skipped per semantics) → clean Windows handoff; **AMD platform** (AM4/Promontory, the bridge-BME fix path exercised); 8 GB SKU shares the 8192 MiB geometry table with the 2070 (other TU106 capacities need the table extended first) |
 | TU102/TU104/TU116 (rest of the 20/16 series) | 1e02–1fff, 2182–21d1 etc. | 🟢 same-family assets + community silicon proof (2080Ti 22G chenxluo +51-75%, 2080Ti 11G nlzy/haohervchb ~1.6×, same chain) |
 | Turing and older (Pascal…) | — | ❌ no transaction track |
 | Blackwell (50 series) / GA100 | — | ❌ different chain, out of scope |
